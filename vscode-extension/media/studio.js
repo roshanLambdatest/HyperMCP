@@ -28,7 +28,8 @@
     <nav class="main-tabs" role="tablist">
       <button class="mtab" data-pane="chat">Chat</button>
       <button class="mtab" data-pane="yaml">YAML <span class="n" id="yamlBadge"></span></button>
-      <button class="mtab" data-pane="setup">Setup</button>
+      <button class="mtab" data-pane="grid">Grid</button>
+      <button class="mtab" data-pane="setup">Setup <span class="n" id="setupBadge"></span></button>
     </nav>
     <section class="pane" data-pane="chat">
       <button class="stackline" id="stackline" title="Show detected stack and options"></button>
@@ -48,6 +49,7 @@
         <button class="btn" id="openEd" title="Save and open in an editor tab">Open</button>
         <button class="btn" id="dry">Dry-run</button>
         <button class="btn" id="copy">Copy</button>
+        <button class="btn" id="optimize" title="Suggest speed, cost and reliability improvements">Optimize</button>
         <button class="btn ghost" id="run" title="Save, then run the HyperExecute CLI in a terminal">▶ Run</button>
       </div>
       <div class="checks">
@@ -55,11 +57,28 @@
           <button class="tab" data-tab="validation">Validation<span class="n" id="nVal"></span></button>
           <button class="tab" data-tab="notes">Notes<span class="n" id="nNotes"></span></button>
           <button class="tab" data-tab="discovery">Discovery</button>
+          <button class="tab" data-tab="optimize">Optimize<span class="n" id="nOpt"></span></button>
         </div>
         <div class="panel" id="checks"></div>
       </div>
     </section>
+    <section class="pane scroll" data-pane="grid">
+      <div class="card"><div class="card-h">Driver setup in this repo</div><div class="card-b" id="driverSetup"><span class="muted small">Loading…</span></div></div>
+      <div class="card"><div class="card-h">Capabilities<span class="spacer"></span><span class="muted small" id="capsLive"></span></div><div class="card-b"><div class="form" id="capsForm"></div></div></div>
+      <div class="card"><div class="card-h"><span id="helperPath">Helper file</span><span class="spacer"></span><button class="icon-btn small" id="capsCopy">Copy</button></div>
+        <pre class="code" id="capsCode"></pre>
+        <div class="actions"><button class="btn primary" id="capsWrite">Create helper file</button></div>
+        <div class="card-b small muted" id="capsNotes"></div></div>
+    </section>
     <section class="pane scroll" data-pane="setup">
+      <div class="card"><div class="card-h">LambdaTest account<span class="spacer"></span><span id="ltState" class="small"></span></div>
+        <div class="card-b stack-gap">
+          <div class="field"><label for="ltUser">Username</label><input type="text" id="ltUser" autocomplete="off" spellcheck="false"></div>
+          <div class="field"><label for="ltKey">Access key</label><input type="password" id="ltKey" autocomplete="off"></div>
+          <div class="row"><button class="btn primary" id="ltSave">Save &amp; test</button><button class="btn ghost" id="ltTest">Test</button><button class="btn ghost" id="ltClear">Remove</button></div>
+          <div class="small muted">Used by ▶ Run to trigger jobs. The key is kept in VS Code's encrypted secret storage.</div>
+        </div></div>
+      <div class="card"><div class="card-h">Credentials &amp; reporting<span class="spacer"></span><button class="icon-btn small" id="rescan">Rescan</button></div><div class="card-b" id="scan"></div></div>
       <div class="card"><div class="card-h">Detected stack<span class="spacer"></span><span id="fileState" class="muted small"></span></div><div class="card-b" id="stack"></div></div>
       <div class="card"><div class="card-h">Options<span class="spacer"></span><button class="icon-btn small" id="resetOpts" title="Reset to detected defaults">Reset</button></div><div class="card-b"><div class="form" id="opts"></div></div></div>
       <div class="card"><div class="card-h">Conversation</div><div class="card-b"><button class="btn ghost" id="clearChat">Clear chat</button></div></div>
@@ -154,7 +173,7 @@
     if (!p) { el.innerHTML = `<span class="muted">Open a folder with test code to begin</span>`; return; }
     const t = p.tests;
     const count = t.scenarioCount ? `${t.scenarioCount} scenarios` : t.methodCount ? `${t.methodCount} tests` : t.fileCount ? `${t.fileCount} spec files` : t.classCount ? `${t.classCount} classes` : "no tests found";
-    el.innerHTML = `<span class="tag">${esc(r.framework || p.language || "?")}</span><span>${esc([p.language, p.buildTool || p.packageManager].filter(Boolean).join(" · "))} · ${count}${r.yamlVersion ? " · YAML v" + r.yamlVersion : ""}</span>${p.warnings?.length ? `<span class="warn-n">⚠ ${p.warnings.length}</span>` : ""}<span class="chev">›</span>`;
+    el.innerHTML = `<span class="tag">${esc(r.framework || p.language || "?")}</span><span>${esc([p.language, p.buildTool || p.packageManager].filter(Boolean).join(" · "))} · ${count}${r.yamlVersion ? " · YAML v" + r.yamlVersion : ""}</span>${S.scan?.credentials?.length ? `<span class="warn-n bad" title="Hard-coded credentials">🔑 ${S.scan.credentials.length}</span>` : ""}${p.warnings?.length ? `<span class="warn-n">⚠ ${p.warnings.length}</span>` : ""}<span class="chev">›</span>`;
   }
 
   function renderStack() {
@@ -223,6 +242,8 @@
     if (p.tests.tags?.length) s.push(`Only run ${p.tests.tags.slice(0, 2).join(" and ")}`);
     s.push("Cross-browser: Chrome and Firefox");
     if (r.yamlVersion === "0.2") s.push("Why v0.2 and not v0.1?");
+    s.push("Optimize this YAML");
+    if (S.scan?.credentials?.length || S.scan?.reporting?.length) s.unshift("What reports to the customer's side?");
     s.push("Fail fast after 3 failures");
     s.push("Explain this YAML");
     return s.slice(0, 6);
@@ -284,6 +305,8 @@
         (v.info || []).map((e) => row("info", "i", e)).join("");
     } else if (activeTab === "notes") {
       el.innerHTML = notes.length ? notes.map((n) => row("info", "i", n)).join("") : `<div class="muted small">No notes.</div>`;
+    } else if (activeTab === "optimize") {
+      renderOptimize(el);
     } else {
       const d = dryRun;
       if (!d) el.innerHTML = `<div class="muted small">Click “Dry-run discovery” to run the discovery command locally and preview the tasks HyperExecute will create.</div>`;
@@ -317,6 +340,123 @@
       toastTimer = setTimeout(() => (t.className = ""), 3200);
     }
   });
+
+  // ================= LambdaTest account =================
+  $("#ltSave").onclick = () => {
+    $("#ltState").textContent = "Checking…";
+    $("#ltState").className = "small muted";
+    send("ltAccountSave", { username: $("#ltUser").value, accessKey: $("#ltKey").value });
+  };
+  $("#ltTest").onclick = () => { $("#ltState").textContent = "Checking…"; send("ltAccountTest"); };
+  $("#ltClear").onclick = () => { $("#ltUser").value = ""; $("#ltKey").value = ""; send("ltAccountClear"); };
+  function renderAccount() {
+    const m = S.meta || {};
+    if (document.activeElement !== $("#ltUser") && !$("#ltUser").value) $("#ltUser").value = m.ltUser || "";
+    $("#ltKey").placeholder = m.ltReady ? "saved — type to replace" : "paste your access key";
+    if (!$("#ltState").dataset.set) {
+      $("#ltState").textContent = m.ltReady ? "✓ saved" : "not set";
+      $("#ltState").className = "small " + (m.ltReady ? "ok" : "warn");
+    }
+  }
+
+  // ================= credentials & reporting scan =================
+  $("#rescan").onclick = () => send("rescan");
+  function renderScan() {
+    const el = $("#scan");
+    const sc = S.scan;
+    const creds = sc?.credentials || [];
+    const rep = sc?.reporting || [];
+    const badge = $("#setupBadge");
+    badge.textContent = creds.length ? `${creds.length}🔑` : "";
+    badge.className = "n " + (creds.length ? "bad" : "");
+    if (!sc) { el.innerHTML = `<span class="muted small">Open a repo to scan.</span>`; return; }
+    const auto = creds.filter((c) => c.autoFix).length;
+    const loc = (f) => `<a class="loc" data-file="${esc(f.file)}" data-line="${f.line}">${esc(f.file)}:${f.line}</a>`;
+    el.innerHTML =
+      `<div class="scan-h ${creds.length ? "bad" : "good"}">${creds.length ? `✕ ${creds.length} hard-coded LambdaTest credential${creds.length > 1 ? "s" : ""}` : "✓ No hard-coded LambdaTest credentials"}</div>` +
+      (creds.length
+        ? `<ul class="findings">${creds.map((c) => `<li>${loc(c)} <span class="tag soft">${esc(c.kind)}</span> <code>${esc(c.value || `${c.username}:${c.accessKey}`)}</code>${c.autoFix ? "" : ` <span class="warn small">edit by hand</span>`}</li>`).join("")}</ul>` +
+          (auto ? `<button class="btn primary" id="fixCreds">Replace ${auto} with LT_USERNAME / LT_ACCESS_KEY</button>` : "") +
+          `<div class="small muted" style="margin-top:6px">After replacing, runs use the account in the card above (▶ Run) or HyperExecute secrets.</div>`
+        : "") +
+      `<div class="scan-h ${rep.length ? "warn" : "good"}" style="margin-top:10px">${rep.length ? `! ${rep.length} place${rep.length > 1 ? "s" : ""} that report to the customer's side` : "✓ No customer-side reporting found"}</div>` +
+      (rep.length ? `<ul class="findings">${rep.map((r) => `<li><b>${esc(r.name)}</b> — ${loc(r)}<div class="small muted">${esc(r.why)} <i>${esc(r.fix)}</i></div></li>`).join("")}</ul>` : "");
+    el.querySelectorAll("a.loc").forEach((a) => (a.onclick = () => send("openFile", { file: a.dataset.file, line: +a.dataset.line })));
+    const fx = $("#fixCreds");
+    if (fx) fx.onclick = () => send("fixCredentials");
+  }
+
+  // ================= Grid (capabilities) =================
+  const caps = { browser: "Chrome", version: "latest", platform: "Windows 11", resolution: "1920x1080", build: "", project: "", video: true, network: false, console: false, visual: false, tunnel: false, headless: false };
+  let capsLists = null;
+  let capsResult = null;
+  let gridLoaded = false;
+  const loadGrid = () => { if (!gridLoaded && S?.profile) { gridLoaded = true; send("capsOptions", { opts: caps }); send("capsGenerate", { opts: caps }); } };
+  document.querySelector('.mtab[data-pane="grid"]').addEventListener("click", loadGrid);
+  let capsTimer;
+  const regenCaps = (refreshLists) => {
+    clearTimeout(capsTimer);
+    capsTimer = setTimeout(() => { if (refreshLists) send("capsOptions", { opts: caps }); send("capsGenerate", { opts: caps }); }, 250);
+  };
+  function renderCapsForm() {
+    const L = capsLists || { browsers: [caps.browser], versions: [caps.version], platforms: [caps.platform], resolutions: [caps.resolution] };
+    const sel = (id, label, list, val) => `<div class="field"><label for="${id}">${label}</label><select id="${id}">${list.map((v) => `<option ${v === val ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>`;
+    const txt = (id, label, val, ph) => `<div class="field"><label for="${id}">${label}</label><input type="text" id="${id}" value="${esc(val)}" placeholder="${esc(ph)}"></div>`;
+    const tog = (id, label) => `<label class="toggle tight"><input type="checkbox" id="c-${id}" ${caps[id] ? "checked" : ""}> ${label}</label>`;
+    if (!L.resolutions.includes(caps.resolution)) caps.resolution = L.resolutions.includes("1920x1080") ? "1920x1080" : L.resolutions[0];
+    $("#capsForm").innerHTML =
+      sel("c-browser", "Browser", L.browsers, caps.browser) + sel("c-version", "Version", L.versions, caps.version) +
+      sel("c-platform", "Operating system", L.platforms, caps.platform) + sel("c-resolution", "Resolution", L.resolutions, caps.resolution) +
+      txt("c-build", "Build name", caps.build, "HyperExecute build") + txt("c-project", "Project", caps.project, "HyperExecute") +
+      `<div class="toggles">${tog("video", "Video")}${tog("network", "Network logs")}${tog("console", "Console logs")}${tog("visual", "Screenshots")}${tog("tunnel", "Tunnel")}${tog("headless", "Headless")}</div>`;
+    for (const k of ["browser", "version", "platform"]) $(`#c-${k}`).onchange = (e) => { caps[k] = e.target.value; regenCaps(true); };
+    $("#c-resolution").onchange = (e) => { caps.resolution = e.target.value; regenCaps(false); };
+    for (const k of ["build", "project"]) $(`#c-${k}`).oninput = (e) => { caps[k] = e.target.value; regenCaps(false); };
+    for (const k of ["video", "network", "console", "visual", "tunnel", "headless"]) $(`#c-${k}`).onchange = (e) => { caps[k] = e.target.checked; regenCaps(false); };
+    $("#capsLive").textContent = capsLists ? (capsLists.live ? "live from LambdaTest" : "offline defaults") : "";
+  }
+  function renderCaps() {
+    const r = capsResult;
+    if (!r) return;
+    const setup = r.setup || [];
+    $("#driverSetup").innerHTML = setup.length
+      ? `<ul class="findings">${setup.slice(0, 8).map((d) => `<li><a class="loc" data-file="${esc(d.file)}" data-line="${d.line}">${esc(d.file)}:${d.line}</a> <span class="tag soft">${esc(d.kind)}</span>${d.usesLambdaTest ? ` <span class="ok small">LambdaTest</span>` : ` <span class="warn small">not LambdaTest</span>`}<div><code>${esc(d.code)}</code></div></li>`).join("")}</ul><div class="small muted">Switch these to the helper below to run on the LambdaTest grid.</div>`
+      : `<span class="muted small">No driver creation found — use the helper below in your test setup.</span>`;
+    $("#driverSetup").querySelectorAll("a.loc").forEach((a) => (a.onclick = () => send("openFile", { file: a.dataset.file, line: +a.dataset.line })));
+    $("#helperPath").textContent = r.helper.path;
+    $("#capsCode").textContent = r.helper.content;
+    $("#capsNotes").innerHTML = `<div><b>Use it:</b> <code>${esc(r.helper.usage)}</code></div>` + r.notes.map((n) => `<div>• ${esc(n)}</div>`).join("");
+  }
+  $("#capsCopy").onclick = () => capsResult && send("copyText", { text: capsResult.helper.content });
+  $("#capsWrite").onclick = () => send("capsWrite", { opts: caps });
+
+  // ================= Optimize =================
+  let optimizeResult = null;
+  $("#optimize").onclick = () => { activeTab = "optimize"; optimizeResult = { loading: true }; renderChecks(); send("optimize"); };
+  function renderOptimize(el) {
+    const o = optimizeResult;
+    if (!o) return (el.innerHTML = `<div class="muted small">Click “Optimize” to check this YAML for speed, cost and reliability improvements.</div>`);
+    if (o.loading) return (el.innerHTML = `<div class="muted small">Analyzing…</div>`);
+    if (o.error) return (el.innerHTML = `<div class="check err"><span class="ic">✕</span><span>${esc(o.error)}</span></div>`);
+    if (!o.suggestions.length) return (el.innerHTML = `<div class="check ok"><span class="ic">✓</span><span>Nothing to optimize — this YAML already follows the recommendations.</span></div>`);
+    el.innerHTML =
+      (o.units ? `<div class="small muted">${o.units} test unit(s) to split.</div>` : "") +
+      o.suggestions.map((s) => `<label class="opt"><input type="checkbox" value="${esc(s.id)}" ${s.severity !== "low" ? "checked" : ""}><span><span class="sev ${s.severity}">${s.severity}</span> <b>${md(s.title)}</b><div class="small muted">${md(s.why)}</div></span></label>`).join("") +
+      `<div class="row" style="margin-top:6px"><button class="btn primary" id="applyOpt">Apply selected</button><button class="btn ghost" id="applyAll">Apply all</button></div>`;
+    const ids = () => [...el.querySelectorAll(".opt input:checked")].map((i) => i.value);
+    $("#applyOpt").onclick = () => ids().length && send("applyOptimizations", { ids: ids() });
+    $("#applyAll").onclick = () => send("applyOptimizations", { ids: "all" });
+  }
+
+  window.addEventListener("message", (e) => {
+    const m = e.data;
+    if (m.type === "state") { renderAccount(); renderScan(); if (!S.profile) gridLoaded = false; }
+    else if (m.type === "ltStatus") { const st = $("#ltState"); st.dataset.set = "1"; st.textContent = (m.ok ? "✓ " : "✕ ") + m.text; st.className = "small " + (m.ok ? "ok" : "bad"); if (m.ok) $("#ltKey").value = ""; }
+    else if (m.type === "capsOptions") { capsLists = m.result; caps.browser = m.result.browser; caps.platform = m.result.platform; if (!m.result.versions.includes(caps.version)) caps.version = "latest"; renderCapsForm(); }
+    else if (m.type === "caps") { capsResult = m.result; renderCaps(); }
+    else if (m.type === "optimize") { optimizeResult = m.result; activeTab = "optimize"; showPane("yaml"); renderChecks(); $("#nOpt").textContent = m.result.suggestions?.length ? `(${m.result.suggestions.length})` : ""; }
+  });
+  renderCapsForm();
 
   send("ready");
 })();

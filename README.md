@@ -12,6 +12,10 @@ Reads a test-automation repo, detects its stack, and generates, validates and dr
 | `search_knowledge_base` | Searches the bundled KB and Confluence together |
 | `get_confluence_page` | Reads a full Confluence page (code/YAML blocks kept) |
 | `knowledge_base_status` | Lists KB topics and tests the Confluence login |
+| `scan_credentials_and_reporting` | Finds hard-coded LambdaTest usernames/access keys (masked) and integrations that report to the customer's side (TestRail, Jira/Xray, ReportPortal, Slack/Teams, email, Allure TestOps, Cypress Cloud, Percy/Applitools, other grids) |
+| `fix_hardcoded_credentials` | Rewrites hard-coded credentials to read `LT_USERNAME` / `LT_ACCESS_KEY`. Dry run by default |
+| `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists. Can write a helper file |
+| `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
 
 Prompt: `create_hyperexecute_yaml` runs the whole workflow.
 

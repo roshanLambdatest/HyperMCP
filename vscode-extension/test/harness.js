@@ -20,6 +20,8 @@ const vscodeStub = {
     workspaceFolders: [{ name: path.basename(tmpRepo), uri: { fsPath: tmpRepo } }],
     getConfiguration: () => ({ get: (k, d) => settings[k] ?? d, update: async (k, v) => (settings[k] = v) }),
     getWorkspaceFolder: () => null,
+    openTextDocument: async (uri) => ({ uri, getText: () => fs.readFileSync(uri.fsPath, "utf8"), positionAt: (n) => n, save: async () => true }),
+    applyEdit: async (edit) => { for (const o of edit.ops) fs.writeFileSync(o.uri.fsPath, o.text); return true; },
     onDidChangeConfiguration: () => ({ dispose() {} }),
   },
   window: {
@@ -27,7 +29,7 @@ const vscodeStub = {
       webview: { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(m), onDidReceiveMessage: (f) => (onMessage = f), set html(v) { this._html = v; }, get html() { return this._html; } },
       onDidDispose: () => {}, reveal: () => {},
     }),
-    showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => x === "Overwrite" || x === "Regenerate"); },
+    showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => ["Overwrite", "Regenerate", "Replace", "Apply", "Download it"].includes(x)); },
     showInformationMessage: async () => {}, showErrorMessage: async (m) => console.log("  [error]", m),
     createStatusBarItem: () => ({ show() {}, dispose() {} }),
     registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
@@ -36,6 +38,9 @@ const vscodeStub = {
   commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} },
   env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
   lm: { selectChatModels: async () => [] },
+  WorkspaceEdit: class { constructor() { this.ops = []; } replace(uri, range, text) { this.ops.push({ uri, text }); } },
+  Range: class { constructor(a, b) { this.a = a; this.b = b; } },
+  Position: class { constructor(l, c) { this.l = l; this.c = c; } },
   Uri: { file: (p) => ({ fsPath: p }), parse: (p) => ({ fsPath: p }) },
   ViewColumn: { Active: 1, Beside: 2 }, StatusBarAlignment: { Right: 2 }, ConfigurationTarget: { Global: 1 },
   CancellationTokenSource: class { constructor() { this.token = { onCancellationRequested() {} }; } cancel() {} dispose() {} },
@@ -48,7 +53,8 @@ require.cache.vscode = { id: "vscode", filename: "vscode", loaded: true, exports
 const ext = require("../extension.js");
 const ctx = {
   extensionPath: path.join(__dirname, ".."), subscriptions: [],
-  secrets: { get: async (k) => secrets.get(k), store: async (k, v) => secrets.set(k, v), onDidChange: () => ({ dispose() {} }) },
+  secrets: { get: async (k) => secrets.get(k), store: async (k, v) => secrets.set(k, v), delete: async (k) => secrets.delete(k), onDidChange: () => ({ dispose() {} }) },
+  globalState: { _m: new Map(), get(k, d) { return this._m.has(k) ? this._m.get(k) : d; }, async update(k, v) { this._m.set(k, v); } },
   workspaceState: { get: (k, d) => d, update: async () => {} },
 };
 ext.activate(ctx);
@@ -104,6 +110,34 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
 
   await send({ type: "save" });
   check("saved to repo", fs.existsSync(path.join(tmpRepo, "hyperexecute.yaml")));
+  if (process.env.FIXTURE === "creds") {
+    s = lastState();
+    check("scan: 13 credentials, reporting found", s.scan.credentials.length === 13 && s.scan.reporting.length >= 3, s.scan.summary);
+    await send({ type: "run" });
+    check("run without account → asks for Setup", posted.some((m) => m.type === "showPane" && m.pane === "setup"));
+    await send({ type: "ltAccountSave", username: "nobody", accessKey: "not-a-real-key-123" });
+    const lt = [...posted].reverse().find((m) => m.type === "ltStatus");
+    check("fake account rejected by LambdaTest (401), not saved", lt && !lt.ok && /401/.test(lt.text) && !ctx.globalState.get("hyperexecute.ltUsername"), JSON.stringify(lt));
+    await send({ type: "capsOptions", opts: { browser: "Firefox" } });
+    const co = [...posted].reverse().find((m) => m.type === "capsOptions");
+    check("live capability lists", co && co.result.live && co.result.browser === "Firefox" && co.result.platforms.length > 3, JSON.stringify(co?.result).slice(0, 300));
+    await send({ type: "capsGenerate", opts: { browser: "Firefox", platform: "Windows 11" } });
+    const cg = [...posted].reverse().find((m) => m.type === "caps");
+    check("capabilities helper + driver setup", cg && /FirefoxOptions/.test(cg.result.helper.content) && cg.result.setup.length > 0);
+    await send({ type: "capsWrite", opts: { browser: "Firefox", platform: "Windows 11" } });
+    check("helper file written", fs.existsSync(path.join(tmpRepo, cg.result.helper.path)));
+    await send({ type: "fixCredentials" });
+    const java = fs.readFileSync(path.join(tmpRepo, "src/test/java/com/acme/BaseTest.java"), "utf8");
+    check("credentials replaced in code, app login untouched", !java.includes("customerjohn") && java.includes("System.getenv(\"LT_ACCESS_KEY\")") && java.includes("standard_user"));
+    check("rescan after fix leaves only config-file items", lastState().scan.credentials.every((c) => !c.autoFix), JSON.stringify(lastState().scan.credentials));
+  }
+  await send({ type: "optimize" });
+  const op = [...posted].reverse().find((m) => m.type === "optimize");
+  check("optimize returns suggestions", op && Array.isArray(op.result.suggestions), JSON.stringify(op));
+  if (op?.result.suggestions.length) {
+    await send({ type: "applyOptimizations", ids: "all" });
+    check("apply optimizations keeps YAML valid", !lastState().error, lastState().error);
+  }
   if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
   process.exit(fails ? 1 : 0);

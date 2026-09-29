@@ -125,7 +125,7 @@ function javaRecipeInner(profile, fw, opts) {
     const cukeJson = findCucumberJson(profile);
     r.partialReports = { location: cukeJson || "target/cucumber-reports/", type: "json", frameworkName: "cucumber" };
     if (!cukeJson) notes.push("No Cucumber `json:` plugin output found in runner options. Add e.g. plugin = {\"json:target/cucumber-reports/cucumber.json\"} so HyperExecute can build the Cucumber report.");
-    r.uploadArtefacts.push({ name: "Reports", path: [maven ? "target/**" : "build/reports/**"] });
+    r.uploadArtefacts.push({ name: "Reports", path: maven ? ["target/cucumber-reports/**", "target/surefire-reports/**"] : ["build/reports/**"] });
     if (!maven) notes.push("Gradle + Cucumber: make sure your test task forwards system properties (systemProperties System.getProperties()) so -Dcucumber.* reaches the JVM.");
     return r;
   }

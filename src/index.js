@@ -13,8 +13,11 @@ import { generateYaml } from "./generator.js";
 import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS } from "./knowledge.js";
 import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
+import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } from "./security.js";
+import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
+import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.0.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.2.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -262,6 +265,138 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "scan_credentials_and_reporting",
+  {
+    title: "Scan for hard-coded credentials and customer reporting",
+    description:
+      "Find hard-coded LambdaTest usernames/access keys (hub URLs with user:key@, ltOptions.put(\"accessKey\", …), LT_USERNAME=…, env fallbacks, WebdriverIO user/key) and reporting integrations that would send results to the customer's systems (their LambdaTest account, TestRail, Jira/Xray, ReportPortal, Slack/Teams, email, Allure TestOps, Cypress Cloud, Percy/Applitools, other cloud grids). Values are masked. Run before triggering any job on a customer repo.",
+    inputSchema: { repoPath: z.string().optional() },
+  },
+  async ({ repoPath }) => {
+    try {
+      return text(scanRepo(resolveRepo(repoPath)));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "fix_hardcoded_credentials",
+  {
+    title: "Replace hard-coded credentials with env vars",
+    description:
+      "Rewrite hard-coded LambdaTest credentials in code to read LT_USERNAME / LT_ACCESS_KEY (System.getenv / os.environ.get / process.env / Environment.GetEnvironmentVariable), so whoever runs the tests uses their own account. dryRun (default true) returns the diff only; set dryRun false to write. Config files (.properties/.json/.env) are reported, not rewritten.",
+    inputSchema: { repoPath: z.string().optional(), dryRun: z.boolean().optional() },
+  },
+  async ({ repoPath, dryRun = true }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const findings = scanCredentials(repo);
+      const plans = planCredentialFixes(repo, findings);
+      const diff = plans.map((p) => {
+        const b = p.before.split("\n");
+        const a = p.after.split("\n");
+        return `--- ${p.file}\n` + a.map((l, i) => (l !== b[i] ? `- ${b[i] ?? ""}\n+ ${l}` : null)).filter(Boolean).join("\n");
+      });
+      if (!dryRun) applyCredentialFixes(repo, plans);
+      const manual = findings.filter((f) => !f.autoFix).map((f) => `${f.file}:${f.line} (${f.kind}) — edit by hand or read from env`);
+      return text(`${dryRun ? "DRY RUN — nothing written." : `Wrote ${plans.length} file(s).`}\n\n${diff.join("\n\n") || "No auto-fixable credentials."}${manual.length ? `\n\nManual:\n- ${manual.join("\n- ")}` : ""}`);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "generate_lambdatest_capabilities",
+  {
+    title: "Generate LambdaTest capabilities",
+    description:
+      "Generate LambdaTest (TestMu AI) grid connection code in the repo's language/framework (Java/Python/C# Selenium, selenium-webdriver, WebdriverIO, Playwright CDP) following https://www.testmuai.com/capabilities-generator/ — capabilities under LT:Options, credentials from LT_USERNAME/LT_ACCESS_KEY. Also lists where the repo currently creates its driver. Call with listOptions:true to get the live browser/version/OS/resolution lists. writeHelper:true writes a helper file (LambdaTestDriverFactory / lambdatest_driver.py / …) without touching existing test code.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      listOptions: z.boolean().optional(),
+      browser: z.string().optional().describe("Chrome | MicrosoftEdge | Firefox | Safari"),
+      version: z.string().optional().describe("latest | latest-1 | a number"),
+      platform: z.string().optional().describe('e.g. "Windows 11", "macOS Sonoma", "Linux"'),
+      resolution: z.string().optional(),
+      build: z.string().optional(),
+      project: z.string().optional(),
+      video: z.boolean().optional(),
+      network: z.boolean().optional(),
+      console: z.boolean().optional(),
+      visual: z.boolean().optional(),
+      tunnel: z.boolean().optional(),
+      headless: z.boolean().optional(),
+      writeHelper: z.boolean().optional(),
+    },
+  },
+  async ({ repoPath, listOptions, writeHelper, ...opts }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      if (listOptions) return text(await capabilityOptions(opts));
+      const profile = analyzeRepo(repo);
+      const r = generateConnection(profile, opts);
+      const setup = findDriverSetup(repo, profile);
+      let written = "";
+      if (writeHelper) {
+        const out = path.join(repo, r.helper.path);
+        if (fs.existsSync(out)) throw new Error(`${r.helper.path} already exists — not overwriting.`);
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, r.helper.content);
+        written = `\nWritten: ${r.helper.path}`;
+      }
+      return text(
+        `Hub: ${r.hub}\nCapabilities:\n${JSON.stringify(r.capabilities, null, 2)}\n\nHelper (${r.helper.path}):\n\`\`\`\n${r.helper.content}\`\`\`\nUsage: ${r.helper.usage}${written}\n\nDriver setup found in repo:\n${setup.map((s) => `- ${s.file}:${s.line} [${s.kind}${s.usesLambdaTest ? ", already LambdaTest" : ""}] ${s.code}`).join("\n") || "- none found"}\n\nNotes:\n- ${r.notes.join("\n- ")}`
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "optimize_hyperexecute_yaml",
+  {
+    title: "Optimize HyperExecute YAML",
+    description:
+      "Review a HyperExecute YAML for speed, cost and reliability: tests running in pre, missing/ineffective dependency cache, idle VMs (concurrency > tests), class vs method split, matrix vs autosplit, v0.1 → v0.2, excessive retries, in-runner parallelism, broad artefact uploads, remote bash discovery on Windows, macOS without need, differentialUpload for large repos. Returns ranked suggestions; pass apply (ids or \"all\") to get the optimized YAML, and write:true to save it.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      yamlPath: z.string().optional().describe("Default hyperexecute.yaml"),
+      yamlContent: z.string().optional(),
+      apply: z.union([z.literal("all"), z.array(z.string())]).optional(),
+      write: z.boolean().optional(),
+    },
+  },
+  async ({ repoPath, yamlPath, yamlContent, apply, write }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const file = path.resolve(repo, yamlPath || "hyperexecute.yaml");
+      const content = yamlContent ?? fs.readFileSync(file, "utf8");
+      const profile = analyzeRepo(repo);
+      const { suggestions, units, error } = optimizeYaml(content, { profile, repoPath: repo });
+      if (error) throw new Error(error);
+      if (!apply) {
+        return text({ testUnits: units, suggestions: describeSuggestions(suggestions), next: "Call again with apply: [ids] or \"all\"." });
+      }
+      let { yaml: out, applied, regenerate } = applyOptimizations(content, apply, { profile, repoPath: repo });
+      if (Object.keys(regenerate).length) {
+        // split / mode / version changes are rebuilt by the generator rather than patched
+        out = generateYaml(profile, { ...regenerate }).yaml;
+        applied.push(`regenerated with ${JSON.stringify(regenerate)} (earlier patches superseded)`);
+      }
+      if (write && !yamlContent) fs.writeFileSync(file, out);
+      const v = validateYaml(out, repo);
+      return text(`Applied: ${applied.join(", ") || "none"}${write && !yamlContent ? `\nWritten: ${file}` : ""}\nValidation: ${v.valid ? "OK" : v.errors.join(" | ")}\n\n\`\`\`yaml\n${out}\`\`\``);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
 // ---------- resources: bundled knowledge ----------
 
 for (const [topic] of Object.entries(listTopics())) {
@@ -291,12 +426,14 @@ server.registerPrompt(
           text: `Create a HyperExecute YAML for the repo at ${repoPath || "the current workspace"}.
 ${requirements ? `Customer requirements: ${requirements}\n` : ""}
 Steps:
-1. Call analyze_repo and summarise the detected stack, tests, and warnings.
+1. Call analyze_repo and summarise the detected stack, tests, and warnings. Call scan_credentials_and_reporting and report hard-coded credentials and customer-side reporting (offer fix_hardcoded_credentials).
 2. Call search_knowledge_base for the detected framework (and any special requirements such as tunnel, secrets, reports, mobile) — prefer Confluence guidance where it conflicts with the bundled notes.
 3. Read the key config files yourself (runner classes, driver/capability setup, config.properties / playwright.config / wdio.conf) to confirm how tests get their browser/grid and credentials.
 4. Call generate_hyperexecute_yaml with the right options (framework, runson, splitBy, concurrency).
 5. Call dry_run_test_discovery and check the discovered count matches expectations.
-6. Resolve every validation error and placeholder, then write the file (write: true) and give the CLI command to run it.`,
+6. Call optimize_hyperexecute_yaml and apply the worthwhile suggestions.
+7. If tests don't already connect to LambdaTest, offer generate_lambdatest_capabilities.
+8. Resolve every validation error and placeholder, then write the file (write: true) and give the CLI command to run it.`,
         },
       },
     ],

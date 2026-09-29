@@ -1,6 +1,6 @@
 {
   "name": "hyperexecute-yaml-mcp",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "MCP server that analyzes a test-automation repo and generates / validates HyperExecute YAML",
   "type": "module",
   "main": "src/index.js",

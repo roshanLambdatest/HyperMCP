@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import YAML from "yaml";
+import fs from "node:fs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fx = (n) => path.join(here, "fixtures", n);
@@ -25,7 +26,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -85,6 +86,25 @@ check("dotnet nunit v0.2", g.text.includes("name: dotnet/nunit") && g.text.inclu
 console.log(g.text, "\n");
 v = JSON.parse((await call("validate_hyperexecute_yaml", { yamlContent: "version: \"0.2\"\nrunson: linux\nautosplit: true\nconcurrency: 2\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\nframework:\n  name: gradle/testng\n  discoveryMode: local\n  baseCommand: integrationTest\n" })).text);
 check("v0.2 validator: testDiscovery trap, remote-only, baseCommand", v.errors.some((e) => e.includes("0 tests")) && v.errors.some((e) => e.includes("only supports remote")) && v.errors.some((e) => e.includes("baseCommand")), v);
+
+// Security scan + credential fix (dry run)
+let sc = JSON.parse((await call("scan_credentials_and_reporting", { repoPath: fx("creds") })).text);
+check("credential scan finds LT creds, skips app login", sc.credentials.length === 13 && !JSON.stringify(sc).includes("standard_user") && !JSON.stringify(sc).includes("abcdefghijklmnop"), sc.summary);
+check("reporting scan finds ReportPortal + Slack", ["reportportal", "slack"].every((k) => sc.reporting.some((r) => r.integration === k)), sc.reporting);
+let fixr = await call("fix_hardcoded_credentials", { repoPath: fx("creds") });
+check("credential fix dry run shows env lookups, writes nothing", fixr.text.startsWith("DRY RUN") && fixr.text.includes("System.getenv(\"LT_ACCESS_KEY\")") && fs.readFileSync(fx("creds") + "/src/test/java/com/acme/BaseTest.java", "utf8").includes("customerjohn"), fixr.text);
+
+// Capabilities
+let cap = await call("generate_lambdatest_capabilities", { repoPath: fx("creds"), browser: "Firefox", platform: "Windows 11" });
+check("java capabilities helper", cap.text.includes("FirefoxOptions") && cap.text.includes("LT:Options") && cap.text.includes("BaseTest.java:21"), cap.text.slice(0, 600));
+let opts = JSON.parse((await call("generate_lambdatest_capabilities", { repoPath: fx("creds"), listOptions: true })).text);
+check("live capability options", opts.browsers.includes("Chrome") && opts.platforms.length > 3, opts);
+
+// Optimizer
+let op = JSON.parse((await call("optimize_hyperexecute_yaml", { repoPath: fx("maven-testng"), yamlContent: "version: 0.1\nrunson: mac\nautosplit: true\nconcurrency: 20\npre:\n  - mvn clean install\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test -Dtest=$test\n" })).text);
+check("optimizer suggestions", ["pre-skip-tests", "add-cache"].every((id) => op.suggestions.some((x) => x.id === id)), op);
+let opa = await call("optimize_hyperexecute_yaml", { repoPath: fx("maven-testng"), yamlContent: "version: 0.1\nrunson: linux\nautosplit: true\nconcurrency: 2\npre:\n  - mvn clean install\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test -Dtest=$test\n", apply: ["pre-skip-tests", "add-cache"] });
+check("optimizer apply", opa.text.includes("-Dmaven.test.skip=true") && opa.text.includes("cacheKey"), opa.text);
 
 // Knowledge base
 let k = JSON.parse((await call("search_knowledge_base", { query: "cucumber report partialReports" })).text);

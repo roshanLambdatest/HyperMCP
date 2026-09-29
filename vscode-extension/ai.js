@@ -60,6 +60,8 @@ Rules:
 - Cross-browser / cross-device requests: extraMatrix axes (tests read them as env vars) — this needs matrix mode (v0.1).
 - Never inline secrets; use \${{ .secrets.NAME }}.
 - Tag lists (e.g. @smoke, regression) go in matrixValues with splitBy "tag".
+- "Optimize" requests: use CONTEXT.optimizerSuggestions — apply them via options where possible (splitBy, yamlVersion, concurrency, retries) or replace_yaml for the rest; mention what you applied.
+- Questions about credentials or customer reporting: answer from CONTEXT.repoScan and point to the Setup tab, where hard-coded credentials can be replaced with env vars.
 - Keep "reply" to 1-4 sentences, plain text. Mention the Confluence page title when you relied on it. If the request is ambiguous, pick the sensible default and say what you assumed.`;
 
 // ---------- backends ----------

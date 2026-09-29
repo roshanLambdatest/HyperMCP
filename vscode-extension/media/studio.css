@@ -187,3 +187,35 @@ select, input[type="number"], input[type="text"] {
 #toast.show { opacity: 1; }
 #toast.error { border-color: var(--err); }
 @media (prefers-reduced-motion: reduce) { #busy::before, .typing i { animation: none; } }
+
+/* account, scan, grid, optimize */
+.stack-gap { display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.bad { color: var(--err); }
+.muted.small.ok, .small.ok { color: var(--ok); }
+.scan-h { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+.scan-h.good { color: var(--ok); }
+.scan-h.bad { color: var(--err); }
+.scan-h.warn { color: var(--warn); }
+.findings { list-style: none; margin: 4px 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.findings li { word-break: break-word; }
+.findings code, .card-b code { font-family: var(--mono); font-size: 11px; background: rgba(127, 127, 127, 0.15); padding: 0 3px; border-radius: 3px; word-break: break-all; }
+a.loc { color: var(--link); cursor: pointer; font-family: var(--mono); font-size: 11px; }
+a.loc:hover { text-decoration: underline; }
+pre.code {
+  margin: 0; max-height: 260px; overflow: auto; padding: 8px 10px; background: var(--editor-bg); border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; line-height: 1.45; white-space: pre;
+}
+.toggles { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.toggle.tight { padding-top: 0; }
+.opt { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12px; }
+.opt:last-of-type { border-bottom: none; }
+.opt input { margin-top: 3px; }
+.sev { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 5px; border-radius: 3px; border: 1px solid currentColor; }
+.sev.high { color: var(--err); }
+.sev.medium { color: var(--warn); }
+.sev.low { color: var(--info); }
+.opt code { font-family: var(--mono); font-size: 0.95em; background: rgba(127, 127, 127, 0.15); padding: 0 3px; border-radius: 3px; }
+.mtab { font-size: 11px; padding-left: 2px; padding-right: 2px; }

@@ -11,7 +11,7 @@ let core;
 async function loadCore() {
   if (!core) {
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -182,7 +182,8 @@ class Studio {
   async refreshMeta() {
     const b = await ai.detectBackend(this.context);
     const { email, token } = await applyAtlassianEnv(this.context);
-    this.state.meta = { backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
+    const acct = await this.ltAccount();
+    this.state.meta = { ltUser: acct.username || null, ltReady: !!(acct.username && acct.accessKey), backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
     this.push();
   }
 
@@ -260,6 +261,63 @@ class Studio {
       case "command":
         if (m.id?.startsWith("hyperexecute.")) await vscode.commands.executeCommand(m.id);
         break;
+      case "ltAccountSave": {
+        const username = String(m.username || "").trim();
+        const accessKey = String(m.accessKey || "").trim();
+        if (!username || !accessKey) return this.toast("Enter both username and access key", "error");
+        const t = await this.testLtAccount(username, accessKey);
+        if (!t.ok) return this.post({ type: "ltStatus", ok: false, text: t.text });
+        await this.context.globalState.update("hyperexecute.ltUsername", username);
+        await this.context.secrets.store("hyperexecute.ltAccessKey", accessKey);
+        this.post({ type: "ltStatus", ok: true, text: t.text });
+        await this.refreshMeta();
+        break;
+      }
+      case "ltAccountTest": {
+        const a = await this.ltAccount();
+        if (!a.username) return this.post({ type: "ltStatus", ok: false, text: "No account saved" });
+        this.post({ type: "ltStatus", ...(await this.testLtAccount(a.username, a.accessKey)) });
+        break;
+      }
+      case "ltAccountClear":
+        await this.context.globalState.update("hyperexecute.ltUsername", undefined);
+        await this.context.secrets.delete("hyperexecute.ltAccessKey");
+        this.post({ type: "ltStatus", ok: false, text: "Removed" });
+        await this.refreshMeta();
+        break;
+      case "rescan":
+        this.state.scan = c.scanRepo(this.state.repo);
+        this.push();
+        break;
+      case "fixCredentials":
+        await this.fixCredentials();
+        break;
+      case "openFile":
+        await this.openFile(m.file, m.line);
+        break;
+      case "capsOptions":
+        this.post({ type: "capsOptions", result: await c.capabilityOptions(m.opts || {}) });
+        break;
+      case "capsGenerate":
+        await this.capabilities(m.opts || {}, false);
+        break;
+      case "capsWrite":
+        await this.capabilities(m.opts || {}, true);
+        break;
+      case "copyText":
+        await vscode.env.clipboard.writeText(String(m.text || ""));
+        this.toast("Copied");
+        break;
+      case "optimize":
+        await this.optimize();
+        break;
+      case "applyOptimizations":
+        if (this.state.dirty && !(await vscode.window.showWarningMessage("Apply optimizations on top of your edited YAML?", { modal: true }, "Apply"))) return;
+        await this.applyOptimizations(m.ids);
+        break;
+      case "downloadCli":
+        await this.downloadCli();
+        break;
       case "clearChat":
         this.state.chat = [];
         this.push();
@@ -275,6 +333,8 @@ class Studio {
       this.state.repo = repoPath;
       this.state.profileFull = c.analyzeRepo(repoPath);
       this.state.profile = c.summarizeProfile(this.state.profileFull, 25);
+      this.state.scan = c.scanRepo(repoPath);
+      this.state.discoveredUnits = null;
       this.state.options = this.context.workspaceState.get(this.optionsKey(), {});
       this.state.dirty = false;
       const out = path.join(repoPath, this.outputName());
@@ -338,6 +398,8 @@ class Studio {
         generated: this.state.result,
         currentYaml: this.state.yaml,
         validation: this.state.validation,
+        repoScan: this.state.scan ? { summary: this.state.scan.summary, credentials: this.state.scan.credentials.map((f) => `${f.file}:${f.line} ${f.kind}`), reporting: this.state.scan.reporting.map((r) => `${r.name} (${r.file}:${r.line})`) } : null,
+        optimizerSuggestions: (() => { try { return c.describeSuggestions(c.optimizeYaml(this.state.yaml, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits }).suggestions); } catch { return []; } })(),
         yamlManuallyEdited: this.state.dirty,
         knowledge: kb,
         history: this.state.chat.slice(-9, -1).map((m) => ({ role: m.role, text: m.text })),
@@ -408,6 +470,7 @@ class Studio {
     execFile("bash", ["-c", cmd], { cwd: this.state.repo, timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       this.busy();
       const items = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      this.state.discoveredUnits = items.length || null;
       this.post({
         type: "dryRun",
         result: { command: cmd, count: items.length, items: items.slice(0, 200), stderr: stderr?.slice(0, 1000), exit: err ? err.code ?? 1 : 0, sample: doc.testRunnerCommand ? items.slice(0, 2).map((t) => doc.testRunnerCommand.replace(/\$test/g, t)) : [] },
@@ -436,22 +499,159 @@ class Studio {
     return target;
   }
 
+  // ---------- LambdaTest account (used by ▶ Run) ----------
+  async ltAccount() {
+    const username = this.context.globalState.get("hyperexecute.ltUsername") || "";
+    const accessKey = (await this.context.secrets.get("hyperexecute.ltAccessKey")) || "";
+    return { username, accessKey };
+  }
+
+  async testLtAccount(username, accessKey) {
+    try {
+      const res = await fetch("https://api.lambdatest.com/automation/api/v1/builds?limit=1", {
+        headers: { Authorization: "Basic " + Buffer.from(`${username}:${accessKey}`).toString("base64") },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.status === 200) return { ok: true, text: `Connected as ${username}` };
+      if (res.status === 401) return { ok: false, text: "Invalid username or access key (401)" };
+      return { ok: false, text: `LambdaTest API returned ${res.status}` };
+    } catch (e) {
+      return { ok: false, text: `Could not reach LambdaTest: ${e.message}` };
+    }
+  }
+
+  // ---------- credentials & reporting ----------
+  async fixCredentials() {
+    const c = await loadCore();
+    const findings = c.scanCredentials(this.state.repo);
+    const plans = c.planCredentialFixes(this.state.repo, findings);
+    if (!plans.length) return this.toast("Nothing to replace automatically — check the manual items.");
+    const n = plans.reduce((a, p) => a + p.edits.length, 0);
+    const pick = await vscode.window.showWarningMessage(
+      `Replace ${n} hard-coded credential(s) in ${plans.length} file(s) with LT_USERNAME / LT_ACCESS_KEY lookups?`,
+      { modal: true, detail: plans.map((p) => `• ${p.file} (${p.edits.length})`).join("\n") + "\n\nYou can undo in each file (Cmd+Z) or with git." },
+      "Replace",
+      "Preview first file"
+    );
+    if (pick === "Preview first file") {
+      const tmp = vscode.Uri.file(path.join(require("os").tmpdir(), `he-${Date.now()}-${path.basename(plans[0].file)}`));
+      fs.writeFileSync(tmp.fsPath, plans[0].after);
+      return vscode.commands.executeCommand("vscode.diff", vscode.Uri.file(path.join(this.state.repo, plans[0].file)), tmp, `${plans[0].file} ↔ with env vars`);
+    }
+    if (pick !== "Replace") return;
+    const edit = new vscode.WorkspaceEdit();
+    const docs = [];
+    for (const p of plans) {
+      const uri = vscode.Uri.file(path.join(this.state.repo, p.file));
+      const doc = await vscode.workspace.openTextDocument(uri);
+      edit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), p.after);
+      docs.push(doc);
+    }
+    await vscode.workspace.applyEdit(edit);
+    for (const d of docs) await d.save();
+    this.toast(`Replaced ${n} credential(s) in ${plans.length} file(s)`);
+    this.state.scan = c.scanRepo(this.state.repo);
+    this.push();
+  }
+
+  async openFile(file, line) {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(this.state.repo, file)));
+    const pos = new vscode.Position(Math.max(0, (line || 1) - 1), 0);
+    await vscode.window.showTextDocument(doc, { selection: new vscode.Range(pos, pos), preview: true });
+  }
+
+  // ---------- capabilities ----------
+  async capabilities(opts, write) {
+    const c = await loadCore();
+    const r = c.generateConnection(this.state.profileFull, opts);
+    if (!write) {
+      const setup = c.findDriverSetup(this.state.repo, this.state.profileFull);
+      return this.post({ type: "caps", result: { ...r, setup } });
+    }
+    const target = path.join(this.state.repo, r.helper.path);
+    if (fs.existsSync(target)) {
+      const a = await vscode.window.showWarningMessage(`${r.helper.path} already exists. Overwrite it?`, { modal: true }, "Overwrite");
+      if (a !== "Overwrite") return;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, r.helper.content);
+    await vscode.window.showTextDocument(vscode.Uri.file(target), { preview: false });
+    this.toast(`Created ${r.helper.path}`);
+  }
+
+  // ---------- optimizer ----------
+  async optimize() {
+    const c = await loadCore();
+    const r = c.optimizeYaml(this.state.yaml, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits });
+    this.post({ type: "optimize", result: { units: r.units, error: r.error, suggestions: c.describeSuggestions(r.suggestions || []) } });
+  }
+
+  async applyOptimizations(ids) {
+    const c = await loadCore();
+    const r = c.applyOptimizations(this.state.yaml, ids, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits });
+    if (Object.keys(r.regenerate).length) {
+      this.state.options = clean({ ...this.state.options, ...r.regenerate, ...(r.regenerate.splitBy ? { executionMode: "autosplit" } : {}) });
+      this.regenerate();
+      this.toast(`Regenerated with ${Object.entries(r.regenerate).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    } else {
+      this.state.yaml = r.yaml;
+      this.state.dirty = true;
+      this.state.validation = strip(c.validateYaml(r.yaml, this.state.repo));
+      this.push();
+      this.toast(`Applied ${r.applied.length} optimization(s)`);
+    }
+    await this.optimize();
+  }
+
+  // ---------- HyperExecute CLI ----------
+  async downloadCli() {
+    const win = process.platform === "win32";
+    const url = `https://downloads.lambdatest.com/hyperexecute/${win ? "windows" : process.platform === "darwin" ? "darwin" : "linux"}/hyperexecute${win ? ".exe" : ""}`;
+    const target = path.join(this.state.repo, win ? "hyperexecute.exe" : "hyperexecute");
+    this.busy("Downloading HyperExecute CLI…");
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`download failed (${res.status})`);
+      fs.writeFileSync(target, Buffer.from(await res.arrayBuffer()));
+      if (!win) fs.chmodSync(target, 0o755);
+      this.toast("HyperExecute CLI downloaded to the repo root");
+      return target;
+    } finally {
+      this.busy();
+    }
+  }
+
   async run() {
     if (this.state.validation && !this.state.validation.valid) {
       const a = await vscode.window.showWarningMessage("The YAML has validation errors. Run anyway?", { modal: true }, "Run anyway");
       if (a !== "Run anyway") return;
     }
+    const acct = await this.ltAccount();
+    if (!acct.username || !acct.accessKey) {
+      this.post({ type: "showPane", pane: "setup" });
+      return this.toast("Add your LambdaTest username and access key in Setup first", "error");
+    }
+    if (this.state.scan?.credentials?.length) {
+      const a = await vscode.window.showWarningMessage(
+        `The repo still has ${this.state.scan.credentials.length} hard-coded credential(s), so some results may go to the customer's account.`,
+        { modal: true },
+        "Run anyway"
+      );
+      if (a !== "Run anyway") return;
+    }
     const saved = await this.save(false);
     if (!saved) return;
-    const cli = ["hyperexecute", "hyperexecute.exe"].map((f) => path.join(this.state.repo, f)).find((p) => fs.existsSync(p));
+    let cli = ["hyperexecute", "hyperexecute.exe"].map((f) => path.join(this.state.repo, f)).find((p) => fs.existsSync(p));
     if (!cli) {
-      const a = await vscode.window.showWarningMessage("HyperExecute CLI not found in the repo root.", "Download instructions");
-      if (a) vscode.env.openExternal(vscode.Uri.parse("https://www.lambdatest.com/support/docs/hyperexecute-cli-run-tests-on-hyperexecute-grid/"));
-      return;
+      const a = await vscode.window.showWarningMessage("HyperExecute CLI not found in the repo root.", "Download it", "Cancel");
+      if (a !== "Download it") return;
+      cli = await this.downloadCli();
     }
-    const term = vscode.window.createTerminal({ name: "HyperExecute", cwd: this.state.repo });
+    // Credentials go in the terminal's environment, never into the command line or history.
+    const term = vscode.window.createTerminal({ name: "HyperExecute", cwd: this.state.repo, env: { LT_USERNAME: acct.username, LT_ACCESS_KEY: acct.accessKey } });
     term.show();
-    term.sendText(`./${path.basename(cli)} --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config ${this.outputName()}`);
+    const ps = process.platform === "win32";
+    term.sendText(ps ? `.\\${path.basename(cli)} --user $env:LT_USERNAME --key $env:LT_ACCESS_KEY --config ${this.outputName()}` : `./${path.basename(cli)} --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config ${this.outputName()}`);
   }
 
   html() {
