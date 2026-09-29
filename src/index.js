@@ -19,7 +19,7 @@ import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } 
 import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.3.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.4.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });

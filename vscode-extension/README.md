@@ -11,6 +11,7 @@ A docked side-bar view (like Claude Code) for building HyperExecute YAMLs from t
 - **Grid** tab: LambdaTest capabilities in the repo's language, from live browser/OS/resolution lists (same format as the TestMu AI capabilities generator), plus a helper file you can add to the repo.
 - **Runs** tab: ▶ Run & watch streams the job log, diagnoses failures (0 tests discovered, missing tools, wrong Java, private network → tunnel, timeouts, missing browsers, memory, dependency downloads…), and fixes the YAML and reruns — on a click, or automatically with **Auto-fix & rerun** (up to N attempts). Test failures are reported, never "fixed" by rerunning. Unrecognized failures can go to the AI.
 - **Optimize** (YAML tab): speed, cost and reliability suggestions; apply the ones you pick.
+- **Reload to update**: when a newer version is installed while VS Code is open, a prompt and a status-bar item offer **Reload Window**.
 - **MCP server**: the same tools are registered for VS Code agent mode.
 
 Open it from the ⚡ icon in the Activity Bar, the `HyperExecute` status bar item, or **HyperExecute: Open YAML Studio** in the Command Palette. It has five tabs: **Chat**, **YAML**, **Grid**, **Runs** and **Setup**.

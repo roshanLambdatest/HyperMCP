@@ -63,6 +63,69 @@ function activate(context) {
   context.subscriptions.push(status);
 
   registerMcpServer(context);
+  watchForNewerVersion(context, status);
+}
+
+// ---------- "Reload to update" ----------
+// A running window keeps the version it loaded until it reloads. When a newer copy of this extension
+// is installed (Extensions view, `code --install-extension`, or a .vsix), offer the reload.
+
+const cmpVersion = (a, b) => {
+  const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  return 0;
+};
+
+function newestInstalledVersion(context) {
+  const { publisher, name } = context.extension.packageJSON;
+  const prefix = `${publisher}.${name}-`.toLowerCase();
+  const dir = path.dirname(context.extensionPath);
+  // extensions.json is VS Code's registry of what's installed; fall back to folder names.
+  try {
+    const reg = JSON.parse(fs.readFileSync(path.join(dir, "extensions.json"), "utf8"));
+    const entry = reg.find((e) => e.identifier?.id?.toLowerCase() === `${publisher}.${name}`.toLowerCase());
+    if (entry?.version) return entry.version;
+  } catch {}
+  let best = null;
+  try {
+    for (const d of fs.readdirSync(dir)) {
+      if (!d.toLowerCase().startsWith(prefix)) continue;
+      const v = d.slice(prefix.length).match(/^\d+\.\d+\.\d+/)?.[0];
+      if (v && (!best || cmpVersion(v, best) > 0)) best = v;
+    }
+  } catch {}
+  return best;
+}
+
+function watchForNewerVersion(context, status) {
+  if (!context.extension?.packageJSON?.version) return;
+  const running = context.extension.packageJSON.version;
+  let offered = null;
+  const check = () => {
+    const newest = newestInstalledVersion(context);
+    if (!newest || cmpVersion(newest, running) <= 0 || offered === newest) return;
+    offered = newest;
+    status.text = "$(sync) HyperExecute: reload to update";
+    status.tooltip = `HyperExecute YAML Studio ${newest} is installed — this window is still running ${running}.`;
+    status.command = "workbench.action.reloadWindow";
+    status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    vscode.window
+      .showInformationMessage(`HyperExecute YAML Studio ${newest} is installed. Reload the window to use it (currently running ${running}).`, "Reload Window", "Later")
+      .then((pick) => pick === "Reload Window" && vscode.commands.executeCommand("workbench.action.reloadWindow"));
+    Studio.current?.post({ type: "updateReady", version: newest, running });
+  };
+  let timer;
+  const soon = () => { clearTimeout(timer); timer = setTimeout(check, 1500); };
+  check();
+  context.subscriptions.push(
+    vscode.extensions.onDidChange(soon),
+    vscode.window.onDidChangeWindowState((s) => s.focused && soon()),
+    { dispose: () => clearTimeout(timer) }
+  );
+  try {
+    const w = fs.watch(path.dirname(context.extensionPath), soon); // new version folder appears
+    context.subscriptions.push({ dispose: () => w.close() });
+  } catch {}
 }
 
 // Expose the bundled MCP server to VS Code agent mode (Copilot etc.).
@@ -335,6 +398,9 @@ class Studio {
       case "applyOptimizations":
         if (this.state.dirty && !(await vscode.window.showWarningMessage("Apply optimizations on top of your edited YAML?", { modal: true }, "Apply"))) return;
         await this.applyOptimizations(m.ids);
+        break;
+      case "reloadWindow":
+        await vscode.commands.executeCommand("workbench.action.reloadWindow");
         break;
       case "clearChat":
         this.state.chat = [];

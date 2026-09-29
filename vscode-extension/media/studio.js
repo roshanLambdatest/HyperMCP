@@ -553,5 +553,16 @@
     } else if (m.type === "runMeta" && S?.run) { S.run.jobUrl = m.jobUrl; renderRun(); }
   });
 
+  // ================= update banner =================
+  window.addEventListener("message", (e) => {
+    if (e.data.type !== "updateReady" || $("#updateBanner")) return;
+    const b = document.createElement("div");
+    b.id = "updateBanner";
+    b.className = "update-banner";
+    b.innerHTML = `<span>Version ${esc(e.data.version)} is installed (running ${esc(e.data.running)}).</span><button class="btn primary">Reload to update</button>`;
+    b.querySelector("button").onclick = () => send("reloadWindow");
+    $(".top").prepend(b);
+  });
+
   send("ready");
 })();
