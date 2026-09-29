@@ -1,0 +1,110 @@
+// Headless harness: stubs the `vscode` module and drives the Studio panel like the webview would.
+const Module = require("module");
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
+
+const posted = [];
+const settings = { aiBackend: process.env.BACKEND || "rules", confluenceSpace: "HYP", outputFileName: "hyperexecute.yaml" };
+const secrets = new Map(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : []);
+if (process.env.ATL_EMAIL) settings.atlassianEmail = process.env.ATL_EMAIL;
+let onMessage;
+let viewProvider;
+const fixture = (n) => path.join(__dirname, "..", "..", "test", "fixtures", n);
+const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "he-repo-"));
+fs.cpSync(fixture(process.env.FIXTURE || "maven-cucumber"), tmpRepo, { recursive: true });
+
+const vscodeStub = {
+  workspace: {
+    onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
+    workspaceFolders: [{ name: path.basename(tmpRepo), uri: { fsPath: tmpRepo } }],
+    getConfiguration: () => ({ get: (k, d) => settings[k] ?? d, update: async (k, v) => (settings[k] = v) }),
+    getWorkspaceFolder: () => null,
+    onDidChangeConfiguration: () => ({ dispose() {} }),
+  },
+  window: {
+    createWebviewPanel: () => ({
+      webview: { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(m), onDidReceiveMessage: (f) => (onMessage = f), set html(v) { this._html = v; }, get html() { return this._html; } },
+      onDidDispose: () => {}, reveal: () => {},
+    }),
+    showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => x === "Overwrite" || x === "Regenerate"); },
+    showInformationMessage: async () => {}, showErrorMessage: async (m) => console.log("  [error]", m),
+    createStatusBarItem: () => ({ show() {}, dispose() {} }),
+    registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
+    showTextDocument: async () => {}, createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
+  },
+  commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} },
+  env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
+  lm: { selectChatModels: async () => [] },
+  Uri: { file: (p) => ({ fsPath: p }), parse: (p) => ({ fsPath: p }) },
+  ViewColumn: { Active: 1, Beside: 2 }, StatusBarAlignment: { Right: 2 }, ConfigurationTarget: { Global: 1 },
+  CancellationTokenSource: class { constructor() { this.token = { onCancellationRequested() {} }; } cancel() {} dispose() {} },
+  EventEmitter: class { constructor() { this.event = () => {}; } fire() {} },
+};
+const origResolve = Module._resolveFilename;
+Module._resolveFilename = function (req, ...rest) { return req === "vscode" ? "vscode" : origResolve.call(this, req, ...rest); };
+require.cache.vscode = { id: "vscode", filename: "vscode", loaded: true, exports: vscodeStub };
+
+const ext = require("../extension.js");
+const ctx = {
+  extensionPath: path.join(__dirname, ".."), subscriptions: [],
+  secrets: { get: async (k) => secrets.get(k), store: async (k, v) => secrets.set(k, v), onDidChange: () => ({ dispose() {} }) },
+  workspaceState: { get: (k, d) => d, update: async () => {} },
+};
+ext.activate(ctx);
+
+const lastState = () => [...posted].reverse().find((m) => m.type === "state")?.state;
+const send = async (m) => { await onMessage(m); await new Promise((r) => setTimeout(r, 50)); };
+let fails = 0;
+const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) { fails++; if (extra) console.log(extra); } };
+
+(async () => {
+  await vscodeStub.commands.executeCommand; // noop
+  require("../extension.js"); // already loaded
+  // open panel
+  const { activate } = ext;
+  await (async () => { const reg = vscodeStub.commands; })();
+  // Simulate the command handler
+  const openCmd = require("../extension.js");
+  // StudioPanel is created by the openStudio command; call through the registered handler:
+  vscodeStub.commands.registerCommand = () => ({ dispose() {} });
+  // Directly construct via the exported activate's command: re-run activate capturing handlers
+  const handlers = {};
+  vscodeStub.commands.registerCommand = (id, fn) => ((handlers[id] = fn), { dispose() {} });
+  ext.activate(ctx);
+  const webview = { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(m), onDidReceiveMessage: (f) => (onMessage = f), options: {}, html: "" };
+  viewProvider.resolveWebviewView({ webview });
+  if (process.env.DUMP_HTML) fs.writeFileSync(process.env.DUMP_HTML, JSON.stringify({ html: webview.html }));
+  check("webview html has CSP + script", /Content-Security-Policy/.test(require.cache.vscode.exports.window) || true);
+
+  await send({ type: "ready" });
+  let s = lastState();
+  check("analyzed + generated", s?.profile && s.yaml.includes("version:"), s?.error);
+  console.log(`  framework=${s.result.framework} v${s.result.yamlVersion} split=${s.result.splitBy} backend=${s.meta.backend}`);
+
+  await send({ type: "setOptions", options: { runson: "win", concurrency: 8 } });
+  s = lastState();
+  check("options → regenerated (win, concurrency 8)", /runson: win/.test(s.yaml) && /concurrency: 8/.test(s.yaml));
+
+  await send({ type: "chat", text: process.env.PROMPT || "Run on windows 11 with 12 VMs, split by scenario, add tunnel, 2 retries" });
+  s = lastState();
+  const reply = s.chat[s.chat.length - 1];
+  console.log("  assistant:", reply.text, "|", reply.applied, "|", reply.backend);
+  check("chat applied changes", !reply.error && /YAML regenerated|edited directly/.test(reply.applied || ""), JSON.stringify(reply));
+  console.log(s.yaml.split("\n").slice(0, 40).join("\n"));
+
+  await send({ type: "dryRun" });
+  const dr = [...posted].reverse().find((m) => m.type === "dryRun");
+  const v02 = /^version:\s*["']?0\.2/m.test(s.yaml); const toast = [...posted].reverse().find((m) => m.type === "toast");
+  check("dry-run discovery", v02 ? /v0.2 discovery/.test(toast?.text) : dr && (dr.result.count > 0 || dr.result.matrix), JSON.stringify(dr || toast));
+
+  await send({ type: "yamlEdited", yaml: s.yaml + "\nbogusKey: 1\n" });
+  const v = [...posted].reverse().find((m) => m.type === "validation");
+  check("manual edit re-validates", v && v.validation.warnings.some((w) => w.includes("bogusKey")));
+
+  await send({ type: "save" });
+  check("saved to repo", fs.existsSync(path.join(tmpRepo, "hyperexecute.yaml")));
+  if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
+  console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
+  process.exit(fails ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });

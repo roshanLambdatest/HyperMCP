@@ -1,0 +1,20 @@
+{
+  "inputs": [
+    { "type": "promptString", "id": "atlassian-email", "description": "Atlassian account email (the one that owns the API token)" },
+    { "type": "promptString", "id": "atlassian-token", "description": "Atlassian / Jira API token", "password": true }
+  ],
+  "servers": {
+    "hyperexecute-yaml": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/Users/roshank/Downloads/hyperMCP/src/index.js"],
+      "env": {
+        "HE_DEFAULT_REPO": "${workspaceFolder}",
+        "CONFLUENCE_BASE_URL": "https://lambdatest.atlassian.net/wiki",
+        "CONFLUENCE_SPACE": "HYP",
+        "ATLASSIAN_EMAIL": "${input:atlassian-email}",
+        "ATLASSIAN_API_TOKEN": "${input:atlassian-token}"
+      }
+    }
+  }
+}

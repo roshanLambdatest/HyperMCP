@@ -1,0 +1,157 @@
+{
+  "name": "hyperexecute-yaml-studio",
+  "displayName": "HyperExecute YAML Studio",
+  "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
+  "version": "1.1.0",
+  "publisher": "roshank-lambdatest",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "hyperexecute.openStudio",
+        "title": "Open YAML Studio",
+        "category": "HyperExecute",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "hyperexecute.setAtlassianToken",
+        "title": "Connect Confluence (Atlassian token)",
+        "category": "HyperExecute"
+      },
+      {
+        "command": "hyperexecute.setAnthropicKey",
+        "title": "Set Anthropic API Key",
+        "category": "HyperExecute"
+      },
+      {
+        "command": "hyperexecute.chooseBackend",
+        "title": "Choose AI Backend",
+        "category": "HyperExecute"
+      },
+      {
+        "command": "hyperexecute.validateActiveFile",
+        "title": "Validate This HyperExecute YAML",
+        "category": "HyperExecute"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hyperexecute",
+          "title": "HyperExecute",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hyperexecute": [
+        {
+          "type": "webview",
+          "id": "hyperexecute.studio",
+          "name": "YAML Studio",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "hyperexecute.openStudio",
+          "when": "resourceFilename =~ /hyperexecute.*\\.ya?ml$/",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "hyperexecute.validateActiveFile",
+          "when": "resourceLangId == yaml"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "hyperexecute.openStudio",
+          "when": "explorerResourceIsFolder"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "hyperexecute.mcp",
+        "label": "HyperExecute YAML"
+      }
+    ],
+    "configuration": {
+      "title": "HyperExecute",
+      "properties": {
+        "hyperexecute.aiBackend": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "claude-cli",
+            "vscode-lm",
+            "anthropic-api",
+            "rules"
+          ],
+          "enumDescriptions": [
+            "Claude Code CLI → VS Code model → Anthropic API → offline rules",
+            "Your Claude Code login (claude -p)",
+            "Any VS Code language model (e.g. Copilot)",
+            "Anthropic API key (Claude Opus 5.5)",
+            "Offline keyword rules, no AI"
+          ],
+          "default": "auto",
+          "description": "AI used by the Studio chat."
+        },
+        "hyperexecute.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude CLI (auto-detected if empty)."
+        },
+        "hyperexecute.claudeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model for the claude CLI backend (e.g. sonnet, opus). Empty = CLI default."
+        },
+        "hyperexecute.atlassianEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian account email for Confluence. The token is kept in secret storage (run: HyperExecute: Connect Confluence)."
+        },
+        "hyperexecute.confluenceBaseUrl": {
+          "type": "string",
+          "default": "https://lambdatest.atlassian.net/wiki"
+        },
+        "hyperexecute.confluenceSpace": {
+          "type": "string",
+          "default": "HYP",
+          "description": "Confluence space key(s), comma-separated."
+        },
+        "hyperexecute.outputFileName": {
+          "type": "string",
+          "default": "hyperexecute.yaml"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "sync": "node scripts/sync-core.js",
+    "package": "npm run sync && npx --yes @vscode/vsce package --allow-missing-repository --skip-license -o hyperexecute-yaml-studio.vsix"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  }
+}

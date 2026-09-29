@@ -1,0 +1,4 @@
+<project><modelVersion>4.0.0</modelVersion><groupId>x</groupId><artifactId>y</artifactId><version>1</version><dependencies>
+<dependency><groupId>io.cucumber</groupId><artifactId>cucumber-java</artifactId><version>7.18.0</version></dependency>
+<dependency><groupId>io.cucumber</groupId><artifactId>cucumber-testng</artifactId><version>7.18.0</version></dependency>
+<dependency><groupId>org.testng</groupId><artifactId>testng</artifactId><version>7.10.2</version></dependency></dependencies></project>

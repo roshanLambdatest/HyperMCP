@@ -1,0 +1,7 @@
+<project><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>demo</artifactId><version>1.0</version>
+<properties><maven.compiler.source>17</maven.compiler.source></properties>
+<dependencies>
+<dependency><groupId>org.testng</groupId><artifactId>testng</artifactId><version>7.10.2</version></dependency>
+<dependency><groupId>org.seleniumhq.selenium</groupId><artifactId>selenium-java</artifactId><version>4.25.0</version></dependency>
+</dependencies>
+<build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId><configuration><suiteXmlFiles><suiteXmlFile>${suiteXmlFile}</suiteXmlFile></suiteXmlFiles></configuration></plugin></plugins></build></project>
