@@ -24,12 +24,12 @@ cd /Users/roshank/Downloads/hyperMCP && npm install && npm test
 
 **VS Code (Copilot agent mode):** copy `examples/vscode-mcp.json` to `<your-automation-repo>/.vscode/mcp.json`, or add it to your user MCP config via *MCP: Open User Configuration*. Start the server from the file, and VS Code prompts once for your Atlassian email and token, then stores them encrypted.
 
-**Claude Code:**
+**Claude Code (available in every repo):**
 ```bash
-claude mcp add hyperexecute-yaml -s user \
-  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token> \
-  -- node /Users/roshank/Downloads/hyperMCP/src/index.js
+claude mcp add hyperexecute-yaml -s user -- npx -y github:roshanLambdatest/HyperMCP
+# optional Confluence: add  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token>  before the --
 ```
+The server analyzes the folder Claude Code is running in. Needs Node.js 18+.
 
 ## Knowledge base
 - **Bundled** (`knowledge/*.md`): YAML key reference, framework recipes, troubleshooting and a pre-sales checklist. Add your own `.md` or golden `.yaml` files here, or point `HE_KB_DIR` at a folder. They get indexed automatically.
