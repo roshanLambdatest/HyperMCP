@@ -9,7 +9,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import YAML from "yaml";
 import { analyzeRepo, summarizeProfile } from "./analyzer.js";
-import { generateYaml } from "./generator.js";
+import { generateYaml, v02FrameworkName } from "./generator.js";
+import { ensureCli, startRun } from "./runner.js";
+import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis } from "./doctor.js";
 import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS } from "./knowledge.js";
 import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
@@ -17,7 +19,7 @@ import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } 
 import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.2.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.3.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -397,6 +399,182 @@ server.registerTool(
   }
 );
 
+// ---------- run → watch → diagnose → fix → rerun ----------
+
+const runs = new Map(); // runId → run record (this server process only)
+
+function ltCreds() {
+  const username = process.env.LT_USERNAME;
+  const accessKey = process.env.LT_ACCESS_KEY;
+  if (!username || !accessKey)
+    throw new Error("LT_USERNAME / LT_ACCESS_KEY aren't set for this MCP server. Re-register it with: claude mcp add hyperexecute-yaml -s user -e LT_USERNAME=<user> -e LT_ACCESS_KEY=<key> -- npx -y github:roshanLambdatest/HyperMCP");
+  return { username, accessKey };
+}
+
+async function launch(repo, config, attempt, parent) {
+  const { username, accessKey } = ltCreds();
+  const cli = await ensureCli(repo);
+  const id = `run-${Date.now().toString(36)}`;
+  const rec = { id, repo, config, attempt, parent, status: "running", tail: "", startedAt: Date.now(), result: null, diagnosis: null };
+  const h = startRun({ cli, repoPath: repo, config, username, accessKey, onData: (s) => { rec.tail = (rec.tail + s).slice(-20000); } });
+  rec.stop = h.stop;
+  h.promise.then(async (r) => {
+    rec.result = r;
+    const evidence = collectEvidence({ output: r.output, repoPath: repo, since: r.startedAt });
+    let yamlText = "";
+    try { yamlText = fs.readFileSync(path.resolve(repo, config), "utf8"); } catch {}
+    const profile = analyzeRepo(repo);
+    rec.diagnosis = diagnose({ evidence, yamlText, profile, exitCode: r.exitCode, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
+    rec.evidence = { files: evidence.files, digest: logDigest(evidence.text) };
+    rec.status = r.stopped ? "stopped" : rec.diagnosis.status;
+  });
+  runs.set(id, rec);
+  return rec;
+}
+
+function runView(rec, tailChars = 3000) {
+  const d = rec.diagnosis ? describeDiagnosis(rec.diagnosis) : null;
+  return {
+    runId: rec.id,
+    attempt: rec.attempt,
+    status: rec.status,
+    elapsedSec: Math.round(((rec.result?.finishedAt || Date.now()) - rec.startedAt) / 1000),
+    exitCode: rec.result?.exitCode ?? null,
+    jobUrl: d?.jobUrl || (rec.tail.match(/https:\/\/[\w.-]*hyperexecute[\w.-]*\/[^\s"')]+/i) || [])[0] || null,
+    diagnosis: d,
+    logFiles: rec.evidence?.files,
+    logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
+    logDigest: rec.status !== "running" && d && ["unknown", "needs-attention"].includes(d.status) ? rec.evidence?.digest : undefined,
+    next:
+      rec.status === "running" ? "Call get_hyperexecute_run again in a minute or two." :
+      rec.status === "fixable" ? "Call fix_and_rerun_hyperexecute with this runId to apply the YAML fixes and start the next attempt." :
+      rec.status === "test-failures" ? "The tests themselves failed — not a YAML problem. Report them; don't rerun." :
+      ["unknown", "needs-attention"].includes(rec.status) ? "Read logDigest, decide on a YAML change (validate it), then call fix_and_rerun_hyperexecute with yamlContent." : undefined,
+  };
+}
+
+server.registerTool(
+  "run_hyperexecute_job",
+  {
+    title: "Run HyperExecute job (watched)",
+    description:
+      "Start a HyperExecute job for the repo with the CLI (downloaded automatically if needed) and watch it. Returns a runId immediately; poll get_hyperexecute_run for progress and, when finished, a diagnosis of any failure with proposed YAML fixes. Uses LT_USERNAME / LT_ACCESS_KEY from this MCP server's environment. Scan for hard-coded customer credentials first (scan_credentials_and_reporting).",
+    inputSchema: { repoPath: z.string().optional(), yamlPath: z.string().optional().describe("Default hyperexecute.yaml") },
+  },
+  async ({ repoPath, yamlPath }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const config = yamlPath || "hyperexecute.yaml";
+      if (!fs.existsSync(path.resolve(repo, config))) throw new Error(`${config} not found in ${repo} — generate and write it first.`);
+      const v = validateYaml(fs.readFileSync(path.resolve(repo, config), "utf8"), repo);
+      if (!v.valid) throw new Error(`Fix validation errors before running: ${v.errors.join(" | ")}`);
+      return text(runView(await launch(repo, config, 1, null)));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "get_hyperexecute_run",
+  {
+    title: "Check a watched HyperExecute run",
+    description: "Status of a run started by run_hyperexecute_job: live log tail while running; when finished, the diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed fixes. waitSeconds (max 240) blocks until the run finishes or the wait elapses.",
+    inputSchema: { runId: z.string(), waitSeconds: z.number().int().min(0).max(240).optional() },
+  },
+  async ({ runId, waitSeconds = 0 }) => {
+    const rec = runs.get(runId);
+    if (!rec) return fail(new Error(`Unknown runId ${runId} (runs live only as long as this server process).`));
+    const until = Date.now() + waitSeconds * 1000;
+    while (rec.status === "running" && Date.now() < until) await new Promise((r) => setTimeout(r, 2000));
+    return text(runView(rec));
+  }
+);
+
+server.registerTool(
+  "fix_and_rerun_hyperexecute",
+  {
+    title: "Apply fixes and rerun",
+    description:
+      "Apply the YAML fixes from a finished run's diagnosis (all, or the listed fixIds) — or your own yamlContent — write the YAML, validate it, and start the next attempt. Refuses when the diagnosis is test failures or a login problem, and after maxAttempts (default 3).",
+    inputSchema: {
+      runId: z.string(),
+      fixIds: z.array(z.string()).optional(),
+      yamlContent: z.string().optional().describe("Your own corrected YAML (for needs-attention / unknown diagnoses)"),
+      rerun: z.boolean().optional().describe("Default true"),
+      maxAttempts: z.number().int().min(1).max(10).optional(),
+    },
+  },
+  async ({ runId, fixIds, yamlContent, rerun = true, maxAttempts = 3 }) => {
+    try {
+      const rec = runs.get(runId);
+      if (!rec) throw new Error(`Unknown runId ${runId}`);
+      if (rec.status === "running") throw new Error("Run is still in progress.");
+      if (["passed", "passed-with-failures"].includes(rec.status) && !yamlContent) throw new Error("Run passed — nothing to fix.");
+      if (["test-failures", "auth-error"].includes(rec.status) && !yamlContent) throw new Error(`Diagnosis is ${rec.status}; changing the YAML won't help.`);
+      if (rec.attempt >= maxAttempts) throw new Error(`Reached ${maxAttempts} attempts — stopping. Review the diagnosis manually.`);
+      const file = path.resolve(rec.repo, rec.config);
+      const before = fs.readFileSync(file, "utf8");
+      let next = yamlContent;
+      let applied = ["custom YAML"];
+      if (!next) {
+        const r = applyDiagnosisFixes(before, rec.diagnosis, fixIds);
+        next = r.yaml;
+        applied = r.applied;
+        if (Object.keys(r.options).length) {
+          const profile = analyzeRepo(rec.repo);
+          next = applyDiagnosisFixes(generateYaml(profile, r.options).yaml, rec.diagnosis, rec.diagnosis._fixes.filter((f) => f.patch).map((f) => f.id)).yaml;
+        }
+      }
+      const v = validateYaml(next, rec.repo);
+      if (!v.valid) throw new Error(`Fixed YAML doesn't validate: ${v.errors.join(" | ")}`);
+      fs.writeFileSync(file, next);
+      const out = { applied, written: file };
+      if (rerun) out.nextRun = runView(await launch(rec.repo, rec.config, rec.attempt + 1, rec.id));
+      return text(out);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "diagnose_hyperexecute_logs",
+  {
+    title: "Diagnose HyperExecute logs",
+    description: "Diagnose a HyperExecute failure from pasted log text or a downloaded log file/folder (e.g. from the dashboard or --download-logs) against the repo's YAML. Returns the diagnosis and, if fixable, the corrected YAML (write:true saves it).",
+    inputSchema: { repoPath: z.string().optional(), logText: z.string().optional(), logPath: z.string().optional(), yamlPath: z.string().optional(), write: z.boolean().optional() },
+  },
+  async ({ repoPath, logText, logPath, yamlPath, write }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      let text_ = logText || "";
+      if (logPath) {
+        const p = path.resolve(repo, logPath);
+        const st = fs.statSync(p);
+        text_ += st.isDirectory() ? collectEvidence({ repoPath: p, since: 1 }).text : fs.readFileSync(p, "utf8");
+      }
+      if (!text_) throw new Error("Pass logText or logPath.");
+      const file = path.resolve(repo, yamlPath || "hyperexecute.yaml");
+      const yamlText = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+      const profile = analyzeRepo(repo);
+      const d = diagnose({ evidence: collectEvidence({ output: text_ }), yamlText, profile, exitCode: 1, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
+      const out = { diagnosis: describeDiagnosis(d) };
+      if (d._fixes.length && yamlText) {
+        const r = applyDiagnosisFixes(yamlText, d);
+        let next = r.yaml;
+        if (Object.keys(r.options).length) next = applyDiagnosisFixes(generateYaml(profile, r.options).yaml, d, d._fixes.filter((f) => f.patch).map((f) => f.id)).yaml;
+        out.applied = r.applied;
+        out.fixedYaml = next;
+        if (write) { fs.writeFileSync(file, next); out.written = file; }
+      } else if (!d.diagnoses.length) out.logDigest = logDigest(text_);
+      return text(out);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
 // ---------- resources: bundled knowledge ----------
 
 for (const [topic] of Object.entries(listTopics())) {
@@ -433,7 +611,8 @@ Steps:
 5. Call dry_run_test_discovery and check the discovered count matches expectations.
 6. Call optimize_hyperexecute_yaml and apply the worthwhile suggestions.
 7. If tests don't already connect to LambdaTest, offer generate_lambdatest_capabilities.
-8. Resolve every validation error and placeholder, then write the file (write: true) and give the CLI command to run it.`,
+8. Resolve every validation error and placeholder, then write the file (write: true).
+9. If the user wants it run: run_hyperexecute_job, poll get_hyperexecute_run, and on a fixable failure call fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test failures.`,
         },
       },
     ],

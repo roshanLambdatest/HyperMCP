@@ -26,14 +26,14 @@ const vscodeStub = {
   },
   window: {
     createWebviewPanel: () => ({
-      webview: { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(m), onDidReceiveMessage: (f) => (onMessage = f), set html(v) { this._html = v; }, get html() { return this._html; } },
+      webview: { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))), onDidReceiveMessage: (f) => (onMessage = f), set html(v) { this._html = v; }, get html() { return this._html; } },
       onDidDispose: () => {}, reveal: () => {},
     }),
     showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => ["Overwrite", "Regenerate", "Replace", "Apply", "Download it"].includes(x)); },
     showInformationMessage: async () => {}, showErrorMessage: async (m) => console.log("  [error]", m),
     createStatusBarItem: () => ({ show() {}, dispose() {} }),
     registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
-    showTextDocument: async () => {}, createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
+    showTextDocument: async () => {}, createOutputChannel: () => ({ append() {}, appendLine() {}, show() {} }), createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
   },
   commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} },
   env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
@@ -78,7 +78,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   const handlers = {};
   vscodeStub.commands.registerCommand = (id, fn) => ((handlers[id] = fn), { dispose() {} });
   ext.activate(ctx);
-  const webview = { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(m), onDidReceiveMessage: (f) => (onMessage = f), options: {}, html: "" };
+  const webview = { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))), onDidReceiveMessage: (f) => (onMessage = f), options: {}, html: "" };
   viewProvider.resolveWebviewView({ webview });
   if (process.env.DUMP_HTML) fs.writeFileSync(process.env.DUMP_HTML, JSON.stringify({ html: webview.html }));
   check("webview html has CSP + script", /Content-Security-Policy/.test(require.cache.vscode.exports.window) || true);
@@ -137,6 +137,46 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   if (op?.result.suggestions.length) {
     await send({ type: "applyOptimizations", ids: "all" });
     check("apply optimizations keeps YAML valid", !lastState().error, lastState().error);
+  }
+  if (process.env.WATCH) {
+    process.env.HE_CLI_PATH = path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute.sh");
+    ctx.globalState._m.set("hyperexecute.ltUsername", "tester");
+    secrets.set("hyperexecute.ltAccessKey", "super-secret-key-42");
+    await send({ type: "resetOptions" });
+    await send({ type: "setOptions", options: { yamlVersion: "0.1", extraEnv: { BASE_URL: "https://example.com" }, tunnel: null } });
+    fs.rmSync(path.join(tmpRepo, "hyperexecute-logs"), { recursive: true, force: true });
+    // auto mode
+    await send({ type: "run", auto: true, maxAttempts: 3 });
+    let r = lastState().run;
+    console.log("  auto history:", r.history.map((x) => `#${x.attempt} ${x.status} ${x.changes.join(";")}`).join(" | "));
+    check("auto: failed → tunnel fix → rerun → passed", r.status === "passed" && r.history.length === 2 && /tunnel/i.test(r.history[0].changes.join()) && /tunnel: true/.test(fs.readFileSync(path.join(tmpRepo, "hyperexecute.yaml"), "utf8")));
+    const logText = posted.filter((m) => m.type === "runLog").map((m) => m.chunk).join("");
+    check("live log streamed, access key masked", /Job Link/.test(logText) && !logText.includes("super-secret-key-42") && logText.includes("****"));
+    check("job link captured", /jobId=1b2c3d4e/.test(r.jobUrl || ""), r.jobUrl);
+    // manual mode
+    await send({ type: "setOptions", options: { tunnel: null } });
+    fs.rmSync(path.join(tmpRepo, "hyperexecute-logs"), { recursive: true, force: true });
+    await send({ type: "run", auto: false, maxAttempts: 3 });
+    r = lastState().run;
+    check("manual: stops at fixable with diagnosis", r.status === "fixable" && r.diagnosis.diagnoses[0].id === "private-network" && r.history.length === 1, JSON.stringify(r.diagnosis));
+    await send({ type: "runApplyFixes", rerun: true });
+    r = lastState().run;
+    check("manual: Apply fixes & rerun → passed", r.status === "passed" && r.attempt === 2);
+  }
+  if (process.env.WATCH_AI) {
+    process.env.HE_CLI_PATH = path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute.sh");
+    process.env.HE_FAKE = "unknown";
+    ctx.globalState._m.set("hyperexecute.ltUsername", "tester");
+    secrets.set("hyperexecute.ltAccessKey", "super-secret-key-42");
+    await send({ type: "setOptions", options: { yamlVersion: "0.1", extraEnv: { BASE_URL: "https://example.com" } } });
+    await send({ type: "run", auto: true, maxAttempts: 3 });
+    let r = lastState().run;
+    check("unrecognized failure: stops (no blind auto-fix)", ["unknown", "needs-attention"].includes(r.status) && r.history.length === 1, r.status);
+    await send({ type: "runAskAI" });
+    r = lastState().run;
+    console.log("  AI:", r.aiSuggestion?.reply, "| action:", r.aiSuggestion?.action, "| valid:", r.aiSuggestion?.valid);
+    check("AI suggestion returned and validated", r.aiSuggestion && r.aiSuggestion.reply && !/^Error/.test(r.aiSuggestion.reply) && (r.aiSuggestion.action !== "replace_yaml" || typeof r.aiSuggestion.valid === "boolean"), JSON.stringify(r.aiSuggestion).slice(0, 500));
+    delete process.env.HE_FAKE;
   }
   if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");

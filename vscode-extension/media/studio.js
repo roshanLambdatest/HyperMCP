@@ -29,6 +29,7 @@
       <button class="mtab" data-pane="chat">Chat</button>
       <button class="mtab" data-pane="yaml">YAML <span class="n" id="yamlBadge"></span></button>
       <button class="mtab" data-pane="grid">Grid</button>
+      <button class="mtab" data-pane="runs">Runs <span class="n" id="runsBadge"></span></button>
       <button class="mtab" data-pane="setup">Setup <span class="n" id="setupBadge"></span></button>
     </nav>
     <section class="pane" data-pane="chat">
@@ -70,6 +71,18 @@
         <div class="actions"><button class="btn primary" id="capsWrite">Create helper file</button></div>
         <div class="card-b small muted" id="capsNotes"></div></div>
     </section>
+    <section class="pane" data-pane="runs">
+      <div class="run-bar">
+        <button class="btn primary" id="runStart">▶ Run &amp; watch</button>
+        <button class="btn ghost" id="runStop" disabled>Stop</button>
+        <span class="spacer"></span>
+        <button class="icon-btn small" id="runOpenLog" title="Open the full log in the Output panel">Full log</button>
+      </div>
+      <div class="run-opts"><label class="toggle tight"><input type="checkbox" id="runAuto"> Auto-fix &amp; rerun</label><label class="small muted">max <select id="runMax"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select> attempts</label></div>
+      <div class="run-status" id="runStatus"></div>
+      <pre class="runlog" id="runLog"></pre>
+      <div class="run-diag" id="runDiag"></div>
+    </section>
     <section class="pane scroll" data-pane="setup">
       <div class="card"><div class="card-h">LambdaTest account<span class="spacer"></span><span id="ltState" class="small"></span></div>
         <div class="card-b stack-gap">
@@ -106,7 +119,6 @@
   $("#save").onclick = () => send("save");
   $("#openEd").onclick = () => send("openInEditor");
   $("#copy").onclick = () => send("copy");
-  $("#run").onclick = () => send("run");
   $("#dry").onclick = () => { activeTab = "discovery"; send("dryRun"); renderChecks(); };
   showPane("chat");
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { activeTab = t.dataset.tab; renderChecks(); }));
@@ -457,6 +469,89 @@
     else if (m.type === "optimize") { optimizeResult = m.result; activeTab = "optimize"; showPane("yaml"); renderChecks(); $("#nOpt").textContent = m.result.suggestions?.length ? `(${m.result.suggestions.length})` : ""; }
   });
   renderCapsForm();
+
+  // ================= Runs (watch → diagnose → fix → rerun) =================
+  const runLog = $("#runLog");
+  let runTimer;
+  const runOpts = () => ({ auto: $("#runAuto").checked, maxAttempts: +$("#runMax").value });
+  $("#runStart").onclick = () => { runLog.textContent = ""; send("run", runOpts()); };
+  $("#runStop").onclick = () => send("runStop");
+  $("#runOpenLog").onclick = () => send("runOpenLog");
+  $("#runAuto").onchange = $("#runMax").onchange = () => send("runSetAuto", runOpts());
+  $("#run").onclick = () => { runLog.textContent = ""; send("run", runOpts()); };
+  const STATUS = {
+    running: ["run", "Running…"],
+    passed: ["good", "✓ Passed"],
+    "passed-with-failures": ["warn", "Finished — some tests failed"],
+    fixable: ["warn", "Failed — fixable in the YAML"],
+    "test-failures": ["bad", "Tests failed — not a YAML problem"],
+    "auth-error": ["bad", "LambdaTest login failed"],
+    "needs-attention": ["warn", "Failed — needs your attention"],
+    unknown: ["bad", "Failed — cause not recognized"],
+    stopped: ["muted", "Stopped"],
+  };
+  const fmtDur = (s) => (s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`);
+  function renderRun() {
+    const r = S.run;
+    const running = r?.status === "running";
+    $("#runStart").disabled = running;
+    $("#runStop").disabled = !running;
+    const badge = $("#runsBadge");
+    badge.textContent = !r ? "" : running ? "●" : r.status === "passed" ? "✓" : ["fixable", "unknown", "test-failures", "auth-error", "needs-attention"].includes(r.status) ? "✕" : "";
+    badge.className = "n " + (!r ? "" : running ? "run" : r.status === "passed" ? "good" : "bad");
+    if (!r) {
+      $("#runStatus").innerHTML = `<div class="muted small">Runs the job with your account, streams the log here, and diagnoses failures. With <b>Auto-fix &amp; rerun</b>, YAML problems are fixed and the job rerun automatically; test failures are never "fixed" by rerunning.</div>`;
+      $("#runDiag").innerHTML = "";
+      return;
+    }
+    if (!runLog.textContent && r.tail) runLog.textContent = r.tail;
+    const [cls, label] = STATUS[r.status] || ["muted", r.status];
+    const elapsed = () => Math.round(((running ? Date.now() : r.startedAt + (r.history.at(-1)?.durationSec || 0) * 1000) - r.startedAt) / 1000);
+    $("#runStatus").innerHTML = `<div class="run-line"><span class="pill ${cls}">${esc(label)}</span><span class="small muted">Attempt ${r.attempt}/${r.maxAttempts}${r.auto ? " · auto-fix on" : ""} · <span id="runElapsed">${fmtDur(elapsed())}</span></span>${r.jobUrl ? `<a class="small" id="jobLink">Open job ↗</a>` : ""}</div>`;
+    if (r.jobUrl) $("#jobLink").onclick = () => send("openLink", { url: r.jobUrl });
+    clearInterval(runTimer);
+    if (running) runTimer = setInterval(() => { const el = $("#runElapsed"); if (el) el.textContent = fmtDur(elapsed()); }, 1000);
+    $("#runAuto").checked = !!r.auto;
+    $("#runMax").value = String(r.maxAttempts);
+
+    const d = r.diagnosis;
+    let html = "";
+    if (d && !running) {
+      html += d.diagnoses.length
+        ? `<ul class="findings">${d.diagnoses.map((x) => `<li><b>${esc(x.title)}</b><div class="small muted">${esc(x.why)}</div>${x.fixSummary ? `<div class="small ok">→ Fix: ${esc(x.fixSummary)}</div>` : ""}${x.advice ? `<div class="small">${esc(x.advice)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Evidence</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`
+        : r.status !== "passed" ? `<div class="small muted">No known failure pattern matched${r.logFiles?.length ? ` in the output and ${r.logFiles.length} downloaded log file(s)` : ""}.</div>` : "";
+      const btns = [];
+      if (r.status === "fixable") btns.push(`<button class="btn primary" id="runFix">Apply fixes &amp; rerun</button>`, `<button class="btn ghost" id="runFixOnly">Apply only</button>`);
+      if (["unknown", "needs-attention", "fixable"].includes(r.status)) btns.push(`<button class="btn ${r.status === "fixable" ? "ghost" : "primary"}" id="runAskAI">Ask AI to fix</button>`);
+      if (r.status !== "running") btns.push(`<button class="btn ghost" id="runAgain">Rerun</button>`);
+      html += `<div class="row">${btns.join("")}</div>`;
+    }
+    if (r.aiSuggestion) {
+      const s = r.aiSuggestion;
+      html += `<div class="ai-sugg"><div class="small muted">AI${s.backend ? ` (${esc(s.backend)})` : ""}:</div><div class="small">${md(s.reply)}</div>${
+        s.yaml ? (s.valid ? `<details><summary class="small muted">Proposed YAML</summary><pre class="cmd">${esc(s.yaml)}</pre></details><div class="row"><button class="btn primary" id="aiApply">Apply AI fix &amp; rerun</button></div>` : `<div class="small bad">Its YAML doesn't validate: ${esc((s.errors || []).join("; "))}</div>`) :
+        s.options ? `<div class="row"><button class="btn primary" id="aiApply">Apply AI fix &amp; rerun</button></div>` : ""
+      }</div>`;
+    }
+    if (r.note) html += `<div class="small warn">${esc(r.note)}</div>`;
+    if (r.history?.length) html += `<div class="hist"><div class="small muted">Attempts</div>${r.history.map((h) => `<div class="small">#${h.attempt} <span class="${(STATUS[h.status] || ["muted"])[0]}">${esc((STATUS[h.status] || ["", h.status])[1])}</span> · ${fmtDur(h.durationSec)}${h.changes.length ? ` → ${esc(h.changes.join("; "))}` : ""}</div>`).join("")}</div>`;
+    $("#runDiag").innerHTML = html;
+    const on = (id, fn) => { const el = $("#" + id); if (el) el.onclick = fn; };
+    on("runFix", () => { runLog.textContent = ""; send("runApplyFixes", { rerun: true }); });
+    on("runFixOnly", () => send("runApplyFixes", { rerun: false }));
+    on("runAskAI", () => send("runAskAI"));
+    on("runAgain", () => { runLog.textContent = ""; send("runRerun"); });
+    on("aiApply", () => { runLog.textContent = ""; send("runApplyAI", { rerun: true }); });
+  }
+  window.addEventListener("message", (e) => {
+    const m = e.data;
+    if (m.type === "state") renderRun();
+    else if (m.type === "runLog") {
+      const atBottom = runLog.scrollTop + runLog.clientHeight >= runLog.scrollHeight - 30;
+      runLog.textContent = (runLog.textContent + m.chunk).slice(-200000);
+      if (atBottom) runLog.scrollTop = runLog.scrollHeight;
+    } else if (m.type === "runMeta" && S?.run) { S.run.jobUrl = m.jobUrl; renderRun(); }
+  });
 
   send("ready");
 })();

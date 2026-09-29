@@ -16,6 +16,10 @@ Reads a test-automation repo, detects its stack, and generates, validates and dr
 | `fix_hardcoded_credentials` | Rewrites hard-coded credentials to read `LT_USERNAME` / `LT_ACCESS_KEY`. Dry run by default |
 | `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists. Can write a helper file |
 | `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
+| `run_hyperexecute_job` | Starts a watched job with the CLI (downloaded automatically) using `LT_USERNAME` / `LT_ACCESS_KEY` from the server env; returns a runId |
+| `get_hyperexecute_run` | Live log tail while running; when finished, a diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed YAML fixes |
+| `fix_and_rerun_hyperexecute` | Applies the diagnosis fixes (or your YAML), validates, writes, and starts the next attempt. Refuses for test failures, login errors, or after max attempts |
+| `diagnose_hyperexecute_logs` | Diagnoses pasted logs or a downloaded log folder and returns the corrected YAML |
 
 Prompt: `create_hyperexecute_yaml` runs the whole workflow.
 
@@ -28,7 +32,7 @@ cd /Users/roshank/Downloads/hyperMCP && npm install && npm test
 
 **VS Code (Copilot agent mode):** copy `examples/vscode-mcp.json` to `<your-automation-repo>/.vscode/mcp.json`, or add it to your user MCP config via *MCP: Open User Configuration*. Start the server from the file, and VS Code prompts once for your Atlassian email and token, then stores them encrypted.
 
-**Claude Code (available in every repo):**
+**Claude Code (available in every repo).** To let it run jobs, add your account with `-e LT_USERNAME=... -e LT_ACCESS_KEY=...` before the `--`:
 ```bash
 claude mcp add hyperexecute-yaml -s user -- npx -y github:roshanLambdatest/HyperMCP
 # optional Confluence: add  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token>  before the --

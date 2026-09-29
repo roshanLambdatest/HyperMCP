@@ -10,7 +10,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fx = (n) => path.join(here, "fixtures", n);
 
 const client = new Client({ name: "smoke", version: "1.0.0" });
-await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, ATLASSIAN_API_TOKEN: "" } }));
+await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") } }));
 
 let failures = 0;
 const call = async (name, args) => {
@@ -26,7 +26,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -105,6 +105,23 @@ let op = JSON.parse((await call("optimize_hyperexecute_yaml", { repoPath: fx("ma
 check("optimizer suggestions", ["pre-skip-tests", "add-cache"].every((id) => op.suggestions.some((x) => x.id === id)), op);
 let opa = await call("optimize_hyperexecute_yaml", { repoPath: fx("maven-testng"), yamlContent: "version: 0.1\nrunson: linux\nautosplit: true\nconcurrency: 2\npre:\n  - mvn clean install\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test -Dtest=$test\n", apply: ["pre-skip-tests", "add-cache"] });
 check("optimizer apply", opa.text.includes("-Dmaven.test.skip=true") && opa.text.includes("cacheKey"), opa.text);
+
+// Run → watch → diagnose → fix → rerun (simulated CLI: fails on DNS until tunnel: true)
+const loopRepo = fs.mkdtempSync(path.join((await import("node:os")).tmpdir(), "he-loop-"));
+fs.cpSync(fx("maven-testng"), loopRepo, { recursive: true });
+await call("generate_hyperexecute_yaml", { repoPath: loopRepo, yamlVersion: "0.1", write: true, extraEnv: { BASE_URL: "https://example.com" } });
+let run = JSON.parse((await call("run_hyperexecute_job", { repoPath: loopRepo })).text);
+check("run started", run.status === "running" && run.runId, run);
+let st = JSON.parse((await call("get_hyperexecute_run", { runId: run.runId, waitSeconds: 30 })).text);
+check("run 1 diagnosed fixable (private network → tunnel)", st.status === "fixable" && st.diagnosis.diagnoses.some((d) => d.id === "private-network") && st.jobUrl, st);
+let fr = JSON.parse((await call("fix_and_rerun_hyperexecute", { runId: run.runId })).text);
+check("fix applied + rerun started", /tunnel/i.test(fr.applied.join()) && fr.nextRun?.attempt === 2 && /tunnel: true/.test(fs.readFileSync(loopRepo + "/hyperexecute.yaml", "utf8")), fr);
+st = JSON.parse((await call("get_hyperexecute_run", { runId: fr.nextRun.runId, waitSeconds: 30 })).text);
+check("run 2 passed", st.status === "passed", st);
+let refuse = await call("fix_and_rerun_hyperexecute", { runId: fr.nextRun.runId });
+check("no rerun after pass", refuse.isError && /passed/.test(refuse.text), refuse.text);
+let dl = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: "Tests run: 5, Failures: 2\njava.lang.AssertionError: expected [x] but found [y]" })).text);
+check("assertion failures → not a YAML problem", dl.diagnosis.status === "test-failures" && !dl.fixedYaml, dl);
 
 // Knowledge base
 let k = JSON.parse((await call("search_knowledge_base", { query: "cucumber report partialReports" })).text);

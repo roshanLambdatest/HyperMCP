@@ -11,7 +11,7 @@ let core;
 async function loadCore() {
   if (!core) {
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -253,7 +253,28 @@ class Studio {
         this.toast("YAML copied to clipboard");
         break;
       case "run":
-        await this.run();
+        await this.run({ auto: m.auto, maxAttempts: m.maxAttempts });
+        break;
+      case "runStop":
+        this.stopRun();
+        break;
+      case "runApplyFixes":
+        await this.applyRunFixes(m.ids || null, m.rerun !== false);
+        break;
+      case "runRerun":
+        if (!this.runHandle && this.state.run) { this.state.run.maxAttempts = Math.max(this.state.run.maxAttempts, this.state.run.attempt + 1); await this.startAttempt(); }
+        break;
+      case "runAskAI":
+        await this.askAiForRunFix();
+        break;
+      case "runApplyAI":
+        await this.applyAiRunFix(m.rerun !== false);
+        break;
+      case "runSetAuto":
+        if (this.state.run) { this.state.run.auto = !!m.auto; this.state.run.maxAttempts = Math.min(10, Math.max(1, +m.maxAttempts || this.state.run.maxAttempts)); }
+        break;
+      case "runOpenLog":
+        this.output().show(true);
         break;
       case "openLink":
         if (/^https:\/\//.test(m.url)) vscode.env.openExternal(vscode.Uri.parse(m.url));
@@ -314,9 +335,6 @@ class Studio {
       case "applyOptimizations":
         if (this.state.dirty && !(await vscode.window.showWarningMessage("Apply optimizations on top of your edited YAML?", { modal: true }, "Apply"))) return;
         await this.applyOptimizations(m.ids);
-        break;
-      case "downloadCli":
-        await this.downloadCli();
         break;
       case "clearChat":
         this.state.chat = [];
@@ -603,25 +621,8 @@ class Studio {
     await this.optimize();
   }
 
-  // ---------- HyperExecute CLI ----------
-  async downloadCli() {
-    const win = process.platform === "win32";
-    const url = `https://downloads.lambdatest.com/hyperexecute/${win ? "windows" : process.platform === "darwin" ? "darwin" : "linux"}/hyperexecute${win ? ".exe" : ""}`;
-    const target = path.join(this.state.repo, win ? "hyperexecute.exe" : "hyperexecute");
-    this.busy("Downloading HyperExecute CLI…");
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`download failed (${res.status})`);
-      fs.writeFileSync(target, Buffer.from(await res.arrayBuffer()));
-      if (!win) fs.chmodSync(target, 0o755);
-      this.toast("HyperExecute CLI downloaded to the repo root");
-      return target;
-    } finally {
-      this.busy();
-    }
-  }
-
-  async run() {
+  async run(opts = {}) {
+    if (this.runHandle) return this.toast("A run is already in progress");
     if (this.state.validation && !this.state.validation.valid) {
       const a = await vscode.window.showWarningMessage("The YAML has validation errors. Run anyway?", { modal: true }, "Run anyway");
       if (a !== "Run anyway") return;
@@ -641,18 +642,175 @@ class Studio {
     }
     const saved = await this.save(false);
     if (!saved) return;
-    let cli = ["hyperexecute", "hyperexecute.exe"].map((f) => path.join(this.state.repo, f)).find((p) => fs.existsSync(p));
-    if (!cli) {
-      const a = await vscode.window.showWarningMessage("HyperExecute CLI not found in the repo root.", "Download it", "Cancel");
-      if (a !== "Download it") return;
-      cli = await this.downloadCli();
-    }
-    // Credentials go in the terminal's environment, never into the command line or history.
-    const term = vscode.window.createTerminal({ name: "HyperExecute", cwd: this.state.repo, env: { LT_USERNAME: acct.username, LT_ACCESS_KEY: acct.accessKey } });
-    term.show();
-    const ps = process.platform === "win32";
-    term.sendText(ps ? `.\\${path.basename(cli)} --user $env:LT_USERNAME --key $env:LT_ACCESS_KEY --config ${this.outputName()}` : `./${path.basename(cli)} --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config ${this.outputName()}`);
+    this.state.run = { auto: !!opts.auto, maxAttempts: Math.min(10, Math.max(1, +opts.maxAttempts || 3)), history: [], attempt: 0 };
+    this.post({ type: "showPane", pane: "runs" });
+    await this.startAttempt();
   }
+
+  output() {
+    if (!this.channel) this.channel = vscode.window.createOutputChannel("HyperExecute");
+    return this.channel;
+  }
+
+  async startAttempt() {
+    const c = await loadCore();
+    const run = this.state.run;
+    const acct = await this.ltAccount();
+    let cli;
+    try {
+      this.busy("Preparing HyperExecute CLI…");
+      cli = await c.ensureCli(this.state.repo);
+    } catch (e) {
+      this.busy();
+      return this.toast(e.message, "error");
+    }
+    this.busy();
+    run.attempt += 1;
+    run.status = "running";
+    run.startedAt = Date.now();
+    run.jobUrl = null;
+    run.diagnosis = null;
+    run.tail = "";
+    this.push();
+    const ch = this.output();
+    ch.appendLine(`\n===== Attempt ${run.attempt} — ${new Date().toLocaleTimeString()} =====`);
+    let pending = "";
+    const flush = () => { if (pending) { this.post({ type: "runLog", chunk: pending }); pending = ""; } };
+    const timer = setInterval(flush, 400);
+    const h = c.startRun({
+      cli, repoPath: this.state.repo, config: this.outputName(), username: acct.username, accessKey: acct.accessKey,
+      onData: (s) => {
+        ch.append(s);
+        pending += s;
+        run.tail = (run.tail + s).slice(-60000);
+        const url = !run.jobUrl && run.tail.match(/https:\/\/[\w.-]*(hyperexecute|lambdatest|testmuai)[\w.-]*\/[^\s"')]*job[^\s"')]*/i);
+        if (url) { run.jobUrl = url[0]; this.post({ type: "runMeta", jobUrl: run.jobUrl }); }
+      },
+    });
+    this.runHandle = h;
+    const r = await h.promise;
+    clearInterval(timer);
+    flush();
+    this.runHandle = null;
+    await this.finishAttempt(r);
+  }
+
+  async finishAttempt(r) {
+    const c = await loadCore();
+    const run = this.state.run;
+    const evidence = c.collectEvidence({ output: r.output, repoPath: this.state.repo, since: r.startedAt });
+    const yamlText = fs.readFileSync(path.join(this.state.repo, this.outputName()), "utf8");
+    const d = c.diagnose({ evidence, yamlText, profile: this.state.profileFull, exitCode: r.exitCode, v02Name: c.v02FrameworkName(this.state.profileFull, this.state.profileFull.primaryFramework) });
+    this.lastDiagnosis = d;
+    this.lastEvidence = evidence;
+    run.status = r.stopped ? "stopped" : d.status;
+    run.jobUrl = run.jobUrl || d.jobUrl;
+    run.diagnosis = c.describeDiagnosis(d);
+    run.logFiles = evidence.files;
+    const entry = { attempt: run.attempt, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [] };
+    run.history.push(entry);
+    this.push();
+    if (r.stopped) return;
+    if (run.status === "fixable" && run.auto && d.canAutoFix) {
+      if (run.attempt >= run.maxAttempts) {
+        run.note = `Stopped after ${run.maxAttempts} attempts — review the diagnosis.`;
+        return this.push();
+      }
+      await this.applyRunFixes(null, true);
+    } else if (["passed", "passed-with-failures"].includes(run.status)) {
+      vscode.window.showInformationMessage(`HyperExecute job ${run.status === "passed" ? "passed" : "finished with test failures"} (attempt ${run.attempt}).`);
+    }
+  }
+
+  // Apply the diagnosis's YAML fixes (or the AI's), save, and start the next attempt.
+  async applyRunFixes(ids, rerun) {
+    const c = await loadCore();
+    const d = this.lastDiagnosis;
+    if (!d) return;
+    const run = this.state.run;
+    let r = c.applyDiagnosisFixes(this.state.yaml, d, ids);
+    if (Object.keys(r.options).length) {
+      this.state.options = clean({ ...this.state.options, ...r.options });
+      this.regenerate();
+      r = { ...c.applyDiagnosisFixes(this.state.yaml, d, d._fixes.filter((f) => f.patch && (!ids || ids.includes(f.id))).map((f) => f.id)), applied: r.applied };
+    }
+    this.state.yaml = r.yaml;
+    this.state.dirty = true;
+    this.state.validation = strip(c.validateYaml(r.yaml, this.state.repo));
+    if (!this.state.validation.valid) {
+      this.push();
+      return this.toast(`Fixed YAML has errors: ${this.state.validation.errors[0]}`, "error");
+    }
+    run.history[run.history.length - 1].changes.push(...r.applied);
+    this.state.overwriteOk = true;
+    await this.save(false);
+    this.state.dirty = false;
+    this.push();
+    if (rerun) await this.startAttempt();
+  }
+
+  // No rule matched: ask the AI backend for a YAML change based on the log digest.
+  async askAiForRunFix() {
+    const c = await loadCore();
+    const run = this.state.run;
+    if (!this.lastEvidence) return;
+    this.busy("Thinking…");
+    try {
+      const context = {
+        task: "A HyperExecute job failed. Propose the YAML change that fixes it (replace_yaml with the full corrected YAML, or update_options). If the failure is in the tests or application, answer_only and explain.",
+        currentYaml: this.state.yaml,
+        diagnosis: run.diagnosis,
+        logDigest: c.logDigest(this.lastEvidence.text),
+        analysis: c.summarizeProfile(this.state.profileFull, 10),
+      };
+      const { plan, backend } = await ai.plan(this.context, context, "Fix the failed HyperExecute run.", undefined);
+      run.aiSuggestion = { reply: plan.reply, backend, action: plan.action };
+      if (plan.action === "replace_yaml" && plan.yaml) {
+        const yaml = plan.yaml.replace(/^```(ya?ml)?\n|```\s*$/g, "");
+        const v = c.validateYaml(yaml, this.state.repo);
+        run.aiSuggestion.yaml = yaml;
+        run.aiSuggestion.valid = v.valid;
+        run.aiSuggestion.errors = v.errors;
+      } else if (plan.action === "update_options") {
+        const next = { ...this.state.options };
+        for (const [k, v] of Object.entries(plan.options || {})) if (v !== null && v !== undefined) next[k] = k === "extraMatrix" ? Object.fromEntries(v.map((a) => [a.key, a.values])) : k === "extraEnv" ? Object.fromEntries(v.map((a) => [a.name, a.value])) : v;
+        run.aiSuggestion.options = clean(next);
+      }
+    } catch (e) {
+      run.aiSuggestion = { reply: `Error: ${e.message}` };
+    } finally {
+      this.busy();
+      this.push();
+    }
+  }
+
+  async applyAiRunFix(rerun) {
+    const c = await loadCore();
+    const run = this.state.run;
+    const s = run.aiSuggestion;
+    if (!s) return;
+    if (s.options) {
+      this.state.options = s.options;
+      this.regenerate();
+    } else if (s.yaml && s.valid) {
+      this.state.yaml = s.yaml;
+      this.state.validation = strip(c.validateYaml(s.yaml, this.state.repo));
+    } else return this.toast("The AI suggestion isn't a valid YAML change", "error");
+    run.history[run.history.length - 1].changes.push(`AI: ${s.reply.slice(0, 120)}`);
+    run.aiSuggestion = null;
+    this.state.overwriteOk = true;
+    await this.save(false);
+    this.push();
+    if (rerun) await this.startAttempt();
+  }
+
+  stopRun() {
+    if (this.runHandle) {
+      this.runHandle.stop();
+      this.toast("Stopping the CLI…");
+    }
+  }
+
 
   html() {
     const w = this.webview;
