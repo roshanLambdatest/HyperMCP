@@ -1,0 +1,3 @@
+plugins { id 'groovy' }
+dependencies { testImplementation "org.spockframework:spock-core:2.3-groovy-4.0" }
+test { useJUnitPlatform() }

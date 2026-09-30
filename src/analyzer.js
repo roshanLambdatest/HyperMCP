@@ -99,11 +99,27 @@ function analyzeJava(root, allFiles, profile) {
     buildText.match(/<java\.version>\s*([\d.]+)/) ||
     buildText.match(/<release>\s*([\d.]+)<\/release>/) ||
     buildText.match(/sourceCompatibility\s*=\s*['"]?(?:JavaVersion\.VERSION_)?([\d._]+)/) ||
-    buildText.match(/languageVersion\.set\(JavaLanguageVersion\.of\((\d+)\)/);
+    buildText.match(/languageVersion(?:\.set\(|\s*=\s*)JavaLanguageVersion\.of\((\d+)\)/) ||
+    buildText.match(/jvmToolchain\((\d+)\)/);
   if (jv) profile.runtimeVersion = jv[1].replace("_", ".").replace(/^1\.(\d+)$/, "$1");
 
   const cukeVer = buildText.match(/<groupId>io\.cucumber<\/groupId>\s*<artifactId>[^<]+<\/artifactId>\s*<version>([^<]+)</);
   if (cukeVer) profile.cucumberVersion = cukeVer[1];
+
+  // Maven profiles: a profile that sets suiteXmlFiles / includes / groups changes what `mvn test` runs.
+  profile.mavenProfiles = [...buildText.matchAll(/<profile>([\s\S]*?)<\/profile>/g)]
+    .map((m) => ({
+      id: (m[1].match(/<id>\s*([^<\s]+)\s*<\/id>/) || [])[1],
+      activeByDefault: /<activeByDefault>\s*true/.test(m[1]),
+      suites: [...m[1].matchAll(/<suiteXmlFile>([^<]+)<\/suiteXmlFile>/g)].map((x) => x[1].trim()),
+      changesTests: /<suiteXmlFiles?>|<includes>|<groups>|<test>/.test(m[1]),
+    }))
+    .filter((x) => x.id);
+  // Gradle multi-module builds
+  const settings = files.filter((f) => /(^|\/)settings\.gradle(\.kts)?$/.test(f)).map((f) => read(root, f)).join("\n");
+  profile.gradleModules = profile.buildTool === "gradle"
+    ? uniq([...settings.matchAll(/include\s*\(?([^)\n]+)\)?/g)].flatMap((m) => [...m[1].matchAll(/['"]:?([\w.:-]+)['"]/g)].map((x) => x[1].replace(/:/g, "/"))))
+    : [];
 
   // Surefire suiteXmlFiles / TestNG suites
   const suiteRefs = [...buildText.matchAll(/<suiteXmlFile>([^<]+)<\/suiteXmlFile>/g)].map((m) => m[1].trim());
@@ -126,6 +142,15 @@ function analyzeJava(root, allFiles, profile) {
     const groups = uniq([...src.matchAll(/groups\s*=\s*\{?([^})]+)/g)].flatMap((g) => [...g[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])));
     const tags = uniq([...src.matchAll(/@Tag\(\s*"([^"]+)"\s*\)/g)].map((x) => x[1]));
     testClasses.push({ file: f, className: pkg ? `${pkg}.${cls}` : cls, simpleName: cls, methods, groups, tags });
+  }
+  // Spock specifications (Groovy): feature methods are def "name"() in classes extending Specification
+  for (const f of byExt(files, ".groovy")) {
+    const src = read(root, f);
+    if (!/extends\s+(spock\.lang\.)?Specification\b/.test(src)) continue;
+    const pkg = (src.match(/^\s*package\s+([\w.]+)/m) || [])[1];
+    const cls = (src.match(/\bclass\s+(\w+)/) || [])[1] || path.basename(f, ".groovy");
+    const methods = [...src.matchAll(/^\s*def\s+["']([^"']+)["']\s*\(/gm)].map((m) => m[1]);
+    testClasses.push({ file: f, className: pkg ? `${pkg}.${cls}` : cls, simpleName: cls, methods, groups: [], tags: [] });
   }
   profile.tests.classes = testClasses;
 
@@ -154,25 +179,64 @@ function analyzeJava(root, allFiles, profile) {
   profile.reports.push(profile.buildTool === "gradle" ? "gradle-test-results" : "surefire");
 }
 
-function analyzeNode(root, files, profile) {
-  const pkgFile = files.includes("package.json") ? "package.json" : byName(files, "package.json")[0];
-  if (!pkgFile) return;
-  let pkg;
+const NODE_TEST_DEPS = ["@playwright/test", "cypress", "@wdio/cli", "webdriverio", "@cucumber/cucumber", "cucumber", "nightwatch", "testcafe", "jest", "mocha"];
+
+function readJson(root, f) {
   try {
-    pkg = JSON.parse(read(root, pkgFile));
+    return JSON.parse(read(root, f));
   } catch {
-    return;
+    return null;
   }
+}
+
+function analyzeNode(root, allFiles, profile) {
+  const pkgFiles = allFiles.filter((f) => f === "package.json" || f.endsWith("/package.json"));
+  if (!pkgFiles.length) return;
   if (profile.language) return; // Java/Python repos sometimes carry a package.json for tooling
+  const hasTestDep = (pkg) => pkg && NODE_TEST_DEPS.some((n) => n in { ...pkg.dependencies, ...pkg.devDependencies });
+  // Monorepos (npm/yarn/pnpm workspaces, Nx, Turborepo, Lerna): tests usually live in one workspace package.
+  const rootJson = allFiles.includes("package.json") ? readJson(root, "package.json") : null;
+  profile.monorepo = Boolean(rootJson?.workspaces || ["pnpm-workspace.yaml", "nx.json", "turbo.json", "lerna.json"].some((f) => allFiles.includes(f)));
+  let pkgFile = allFiles.includes("package.json") ? "package.json" : [...pkgFiles].sort((x, y) => x.split("/").length - y.split("/").length)[0];
+  let pkg = readJson(root, pkgFile);
+  if (!hasTestDep(pkg)) {
+    const candidates = pkgFiles.filter((f) => f !== pkgFile && hasTestDep(readJson(root, f))).sort((x, y) => x.split("/").length - y.split("/").length);
+    if (candidates.length) {
+      pkgFile = candidates[0];
+      pkg = readJson(root, pkgFile);
+      if (candidates.length > 1) profile.warnings.push(`Several packages have test frameworks (${candidates.map((c) => path.posix.dirname(c)).join(", ")}); using ${path.posix.dirname(pkgFile)}/. Open another one as the repo folder to switch.`);
+    }
+  }
+  if (!pkg) return;
   profile.language = "node";
   profile.buildFiles.push(pkgFile);
   profile.packageRoot = path.posix.dirname(pkgFile) === "." ? "" : path.posix.dirname(pkgFile);
-  profile.packageManager = files.includes("pnpm-lock.yaml") ? "pnpm" : files.includes("yarn.lock") ? "yarn" : "npm";
-  profile.lockFile = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"].find((f) => files.includes(f)) || null;
+  // In a workspace the lock file and the install live at the repo root, not in the test package.
+  profile.installRoot = profile.monorepo ? "" : profile.packageRoot;
+  const inInstall = (f) => (profile.installRoot ? `${profile.installRoot}/${f}` : f);
+  profile.lockFile = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"].map(inInstall).find((f) => allFiles.includes(f)) || null;
+  profile.packageManager = /pnpm/.test(profile.lockFile || "") || allFiles.includes("pnpm-workspace.yaml") ? "pnpm" : /yarn/.test(profile.lockFile || "") ? "yarn" : "npm";
   profile.scripts = pkg.scripts || {};
   if (pkg.engines?.node) profile.runtimeVersion = pkg.engines.node.replace(/[^\d.]/g, "").split(".")[0] || null;
-  const nvmrc = read(root, ".nvmrc").trim();
+  const nvmrc = (read(root, ".nvmrc") || read(root, path.posix.join(profile.packageRoot, ".nvmrc"))).trim();
   if (nvmrc) profile.runtimeVersion = nvmrc.replace(/^v/, "").split(".")[0];
+
+  // Only files inside the test package count from here on.
+  const files = allFiles.filter((f) => !profile.packageRoot || f.startsWith(profile.packageRoot + "/"));
+  const relPkg = (f) => (profile.packageRoot && f.startsWith(profile.packageRoot + "/") ? f.slice(profile.packageRoot.length + 1) : f);
+  const inPkg = (f) => (profile.packageRoot ? path.posix.join(profile.packageRoot, f) : path.posix.normalize(f));
+
+  // Scripts that run the test tool with extra arguments or env vars (config path, project, cross-env …).
+  const toolRe = /\b(playwright test|cypress run|wdio( run)?|cucumber-js|nightwatch|testcafe|jest|mocha)\b/;
+  profile.testScripts = Object.entries(profile.scripts)
+    .filter(([, cmd]) => toolRe.test(cmd))
+    .map(([name, cmd]) => ({
+      name,
+      command: cmd,
+      config: (cmd.match(/(?:--config[= ]|\s-c\s)\s*['"]?([^\s'"]+)/) || [])[1]?.replace(/^\.\//, "") || null,
+      project: (cmd.match(/--project[= ]['"]?([\w-]+)/) || [])[1] || null,
+      env: Object.fromEntries([...cmd.matchAll(/(?:^|\s)([A-Z][A-Z0-9_]+)=([^\s]+)/g)].map((m) => [m[1], m[2]])),
+    }));
 
   const all = { ...pkg.dependencies, ...pkg.devDependencies };
   const d = (n) => Object.prototype.hasOwnProperty.call(all, n);
@@ -194,27 +258,38 @@ function analyzeNode(root, files, profile) {
   if (d("allure-playwright") || d("allure-commandline") || d("@wdio/allure-reporter")) profile.reports.push("allure");
   if (d("jest-junit") || d("mocha-junit-reporter") || d("@wdio/junit-reporter")) profile.reports.push("junit-xml");
 
-  // Test files per framework
+  // Test files per framework (paths stay repo-relative; the generator strips packageRoot)
   const specRe = /\.(spec|test)\.(m?[jt]sx?)$/;
   let tests = [];
   const fw = profile.frameworks[0];
+  const scriptCfg = (re) => profile.testScripts.find((t) => re.test(t.command) && t.config)?.config;
   if (fw === "playwright") {
-    const cfg = files.find((f) => /^playwright\.config\.[mc]?[jt]s$/.test(path.posix.basename(f)));
-    profile.configFile = cfg || null;
-    const testDir = cfg && (read(root, cfg).match(/testDir\s*:\s*['"`]([^'"`]+)['"`]/) || [])[1];
-    profile.testDir = testDir ? testDir.replace(/^\.\//, "") : null;
-    tests = files.filter((f) => specRe.test(f) && (!profile.testDir || f.startsWith(profile.testDir)));
+    const sc = scriptCfg(/playwright test/);
+    const cfg =
+      (sc && files.includes(inPkg(sc)) ? inPkg(sc) : null) ||
+      files.find((f) => /^playwright\.config\.[mc]?[jt]s$/.test(path.posix.basename(f))) ||
+      files.find((f) => /\.config\.[mc]?[jt]s$/.test(f) && /@playwright\/test/.test(read(root, f)));
+    profile.configFile = cfg ? relPkg(cfg) : null;
+    const cfgText = cfg ? read(root, cfg) : "";
+    const testDir = (cfgText.match(/testDir\s*:\s*['"`]([^'"`]+)['"`]/) || [])[1];
+    // testDir is relative to the config file; keep it relative to the package root
+    profile.testDir = testDir ? relPkg(path.posix.normalize(path.posix.join(path.posix.dirname(cfg), testDir))) : null;
+    const projectsBlock = (cfgText.match(/projects\s*:\s*\[([\s\S]*)\]/) || [])[1] || "";
+    profile.playwrightProjects = uniq([...projectsBlock.matchAll(/\bname\s*:\s*['"`]([^'"`]+)['"`]/g)].map((m) => m[1]));
+    const w = cfgText.match(/workers\s*:\s*(\d+)/);
+    profile.playwrightWorkers = w ? Number(w[1]) : null;
+    tests = files.filter((f) => specRe.test(f) && (!profile.testDir || relPkg(f).startsWith(profile.testDir + "/")));
     profile.reports.push("playwright-html");
   } else if (fw === "cypress") {
-    profile.configFile = files.find((f) => /^cypress\.config\.[jt]s$|^cypress\.json$/.test(f)) || null;
-    tests = files.filter((f) => /\.cy\.[jt]sx?$/.test(f) || (f.startsWith("cypress/integration/") && /\.[jt]s$/.test(f)));
+    profile.configFile = files.map(relPkg).find((f) => /^cypress\.config\.[cm]?[jt]s$|^cypress\.json$/.test(f)) || null;
+    tests = files.filter((f) => /\.cy\.[jt]sx?$/.test(f) || (relPkg(f).startsWith("cypress/integration/") && /\.[jt]s$/.test(f)));
   } else if (fw === "webdriverio") {
-    profile.configFile = files.find((f) => /wdio.*\.conf\.[jt]s$/.test(f)) || null;
+    profile.configFile = scriptCfg(/wdio/) || files.map(relPkg).find((f) => /wdio.*\.conf\.[jt]s$/.test(f)) || null;
     tests = files.filter((f) => (specRe.test(f) || /\.e2e\.[jt]s$/.test(f) || /specs?\//.test(f) && /\.[jt]s$/.test(f)) && !f.includes("pageobjects"));
   } else if (fw === "cucumber-js") {
     tests = byExt(files, ".feature");
   } else if (fw === "nightwatch") {
-    profile.configFile = files.find((f) => /nightwatch\.(conf|json)/.test(f)) || null;
+    profile.configFile = files.map(relPkg).find((f) => /nightwatch\.(conf|json)/.test(f)) || null;
     tests = files.filter((f) => /(^|\/)(tests?|specs?)\//.test(f) && /\.[jt]s$/.test(f));
   } else {
     tests = files.filter((f) => specRe.test(f));
@@ -223,22 +298,37 @@ function analyzeNode(root, files, profile) {
 }
 
 function analyzePython(root, files, profile) {
-  const reqs = files.filter((f) => /(^|\/)requirements[\w-]*\.txt$/.test(f));
+  const reqs = files.filter((f) => /(^|\/)requirements?[\w-]*\.txt$/.test(f));
   const manifests = [...reqs, ...["pyproject.toml", "setup.py", "Pipfile", "setup.cfg", "tox.ini", "pytest.ini"].filter((f) => files.includes(f))];
   const pyFiles = byExt(files, ".py", ".robot");
   if (profile.language || (!manifests.length && !pyFiles.length)) return;
   profile.language = "python";
   profile.buildFiles.push(...manifests);
-  profile.requirementsFile = reqs.find((f) => f === "requirements.txt") || reqs[0] || null;
-  const pv = read(root, ".python-version").trim() || (read(root, "pyproject.toml").match(/python\s*=\s*["'][^\d]*([\d.]+)/) || [])[1];
+  profile.requirementsFile = reqs.find((f) => /^requirements?\.txt$/.test(f)) || reqs[0] || null;
+  const pyproject = read(root, "pyproject.toml");
+  const pv = read(root, ".python-version").trim() || (pyproject.match(/(?:requires-python|\bpython)\s*=\s*["'][^\d]*([\d.]+)/) || [])[1];
   if (pv) profile.runtimeVersion = pv.split(".").slice(0, 2).join(".");
+  // How dependencies get installed when there is no requirements file.
+  if (pyproject) {
+    profile.poetry = /^\[tool\.poetry\]/m.test(pyproject);
+    const extrasBlock = (pyproject.match(/^\[project\.optional-dependencies\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m) || [])[1] || "";
+    const extras = [...extrasBlock.matchAll(/^\s*([\w-]+)\s*=\s*\[([^\]]*)\]/gm)].map((m) => ({ name: m[1], deps: m[2].toLowerCase() }));
+    profile.pythonTestExtras = extras.filter((e) => /pytest|behave|robotframework|selenium|playwright/.test(e.deps)).map((e) => e.name);
+    const poetryGroups = [...pyproject.matchAll(/^\[tool\.poetry\.group\.([\w-]+)\.dependencies\]/gm)].map((m) => m[1]);
+    profile.poetryGroups = poetryGroups;
+  }
+  // pytest settings that change collection or parallelism
+  const iniText = [pyproject.match(/^\[tool\.pytest\.ini_options\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] || "", read(root, "pytest.ini"), read(root, "setup.cfg").match(/^\[tool:pytest\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] || "", read(root, "tox.ini").match(/^\[pytest\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1] || ""].join("\n");
+  const tp = iniText.match(/testpaths\s*=\s*(\[[^\]]*\]|[^\n]+)/);
+  profile.pytestTestpaths = tp ? [...tp[1].matchAll(/["']?([\w./-]+)["']?/g)].map((m) => m[1]).filter((x) => x && x !== "testpaths") : [];
+  profile.pytestAddopts = (iniText.match(/addopts\s*=\s*["']?([^"'\n]+)/) || [])[1]?.trim() || null;
 
   const text = manifests.map((f) => read(root, f)).join("\n").toLowerCase();
   const d = (n) => text.includes(n);
   if (d("robotframework") || byExt(files, ".robot").length) profile.frameworks.push("robot");
   if (d("behave") || (byExt(files, ".feature").length && files.some((f) => f.endsWith("steps.py") || f.includes("/steps/")))) profile.frameworks.push("behave");
   if (d("pytest-bdd")) profile.frameworks.push("pytest-bdd");
-  if (d("pytest") || files.some((f) => /(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(f)) || files.includes("conftest.py")) profile.frameworks.push("pytest");
+  if (d("pytest") || files.some((f) => /(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(f)) || files.includes("conftest.py") || (!profile.frameworks.length && byExt(files, ".py").some((f) => /^\s*(async\s+)?def\s+test\w*\s*\(/m.test(read(root, f))))) profile.frameworks.push("pytest");
   if (d("selenium")) profile.drivers.push("selenium");
   if (d("playwright")) profile.drivers.push("playwright");
   if (d("appium")) profile.drivers.push("appium");
@@ -252,6 +342,11 @@ function analyzePython(root, files, profile) {
   else if (fw === "behave" || fw === "pytest-bdd") profile.tests.files = byExt(files, ".feature");
   else {
     profile.tests.files = files.filter((f) => /(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(f));
+    // Files named otherwise still run when passed to pytest explicitly; find them by content.
+    if (!profile.tests.files.length) {
+      profile.tests.files = byExt(files, ".py").filter((f) => !/(^|\/)(conftest|setup|__init__)\.py$/.test(f) && /^\s*(async\s+)?def\s+test\w*\s*\(/m.test(read(root, f)));
+      if (profile.tests.files.length) profile.pytestByContent = true;
+    }
     profile.tests.functions = profile.tests.files.flatMap((f) => {
       const out = [];
       let cls = null;
@@ -391,6 +486,88 @@ function buildWarnings(profile) {
     w.push(`TestNG suite file(s) found (${profile.testngSuites.join(", ")}). Class-level autosplit uses -Dtest=<class>, which bypasses suite XML parameters/listeners. If the suite XML carries required <parameter>s or listeners, prefer discovery by suite XML or pass them as -D properties.`);
 }
 
+// ---------- confidence ----------
+// Says how sure the analysis is, what it assumed, and what to ask the user instead of guessing.
+// high: nothing ambiguous · medium: works, but an assumption could be wrong · low: generation will likely be wrong.
+
+function assessConfidence(profile) {
+  const low = [];
+  const medium = [];
+  const assumptions = [];
+  const questions = [];
+  const t = profile.tests;
+  const fw = profile.primaryFramework;
+  const testCount = t.classes.length + t.files.length + t.features.length;
+
+  if (!profile.language) low.push("language not detected");
+  if (!fw) low.push("no test framework detected");
+  if (profile.language && !testCount) low.push("no tests found");
+  if (profile.truncated) medium.push(`repo has more than ${MAX_FILES} files; the scan stopped early`);
+
+  // Several frameworks in one repo
+  const runners = profile.frameworks.filter((f) => !["serenity", "karate", "pytest-bdd"].includes(f));
+  if (runners.length > 1) {
+    const pairs = { "cucumber+testng": "Cucumber running on TestNG", "cucumber+junit5": "Cucumber on the JUnit Platform", "cucumber+junit4": "Cucumber on JUnit 4" };
+    const known = pairs[runners.slice(0, 2).join("+")];
+    if (known && runners.length === 2) assumptions.push(`Treating this as ${known}; tests are split by feature/scenario, not by class.`);
+    else {
+      medium.push(`several test frameworks: ${runners.join(", ")}`);
+      assumptions.push(`Using ${fw} (first of ${runners.join(", ")}).`);
+      questions.push(`Which framework runs the tests you want on HyperExecute: ${runners.join(", ")}?`);
+    }
+  }
+  if (profile.language === "java" && t.classes.length && !profile.frameworks.some((f) => ["testng", "junit5", "junit4", "spock", "cucumber"].includes(f))) {
+    medium.push("@Test methods found but no TestNG/JUnit dependency in the build files");
+    questions.push("Which test framework do the @Test methods use (TestNG, JUnit 4, JUnit 5)? It isn't declared in the build files I could read.");
+  }
+  if (profile.language === "java" && profile.frameworks.includes("cucumber") && !profile.cucumberRunners.length) medium.push("Cucumber without a runner class");
+
+  // Maven profiles that change which tests run
+  const changing = (profile.mavenProfiles || []).filter((p) => p.changesTests);
+  if (changing.length) {
+    const def = changing.find((p) => p.activeByDefault);
+    medium.push(`Maven profiles change the test selection (${changing.map((p) => p.id).join(", ")})`);
+    assumptions.push(def ? `Profile "${def.id}" is active by default, so plain mvn uses ${def.suites.join(", ") || "its settings"}.` : "No profile is passed (-P), so surefire's defaults apply.");
+    questions.push(`Which Maven profile should the run use (${changing.map((p) => p.id).join(", ")})? Pass it as mavenProfile.`);
+  }
+  // Gradle multi-module
+  if ((profile.gradleModules || []).length > 1) {
+    assumptions.push(`Gradle multi-module build (${profile.gradleModules.join(", ")}): tests run through the root build, which runs every module's test task.`);
+  }
+
+  // Node specifics
+  if (profile.monorepo) assumptions.push(`Workspace monorepo: dependencies are installed at the repo root and tests run from ${profile.packageRoot || "the root"}/.`);
+  const script = (profile.testScripts || [])[0];
+  if (script?.config) assumptions.push(`Using the config from the "${script.name}" script: ${script.config}.`);
+  if (script && Object.keys(script.env).length) assumptions.push(`The "${script.name}" script sets ${Object.entries(script.env).map(([k, v]) => `${k}=${v}`).join(", ")}; these go into the YAML env.`);
+  if ((profile.playwrightProjects || []).length > 1) {
+    assumptions.push(`playwright config has ${profile.playwrightProjects.length} projects (${profile.playwrightProjects.join(", ")}); each task runs every project unless --project is passed.`);
+    questions.push(`Should every Playwright project run (${profile.playwrightProjects.join(", ")}), or only some? Pass extraMatrix {"project": [...]} to spread them over VMs.`);
+  }
+  if (fw === "playwright" && !profile.configFile) medium.push("no playwright config found");
+
+  // Python specifics
+  if (profile.language === "python") {
+    const text = profile.buildFiles.join(" ");
+    if (fw === "pytest" && !/requirements|pyproject|setup|Pipfile|tox|pytest\.ini/.test(text)) medium.push("pytest assumed from file names only");
+    if (!profile.requirementsFile && profile.buildFiles.includes("pyproject.toml")) {
+      const extras = profile.pythonTestExtras || [];
+      assumptions.push(profile.poetry ? "Installing with Poetry (no requirements file)." : extras.length ? `Installing with pip install -e ".[${extras.join(",")}]" (no requirements file).` : "Installing with pip install -e . — test tools must be in the main dependencies.");
+      if (!profile.poetry && !extras.length) medium.push("no requirements file and no test extras in pyproject.toml");
+    }
+    if (/(^|\s)-n\s*\S+|--numprocesses/.test(profile.pytestAddopts || "")) assumptions.push(`pytest addopts has "${profile.pytestAddopts}"; the runner adds -n 0 so each VM runs its share serially.`);
+  }
+
+  // Env vars the tests read that have no value
+  const needValues = profile.envVars.filter((v) => !/(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|USERNAME|USER_NAME|CREDENTIAL|AUTH)/i.test(v) && !(profile.testScripts || []).some((s) => v in s.env));
+  if (needValues.length) questions.push(`The tests read ${needValues.join(", ")}. What values should the run use?`);
+
+  const level = low.length ? "low" : medium.length ? "medium" : "high";
+  profile.confidence = { level, reasons: [...low, ...medium] };
+  profile.assumptions = assumptions;
+  profile.questions = questions;
+}
+
 // ---------- public API ----------
 
 export function analyzeRepo(repoPath) {
@@ -413,6 +590,11 @@ export function analyzeRepo(repoPath) {
     tests: { classes: [], files: [], features: [], scenarios: [], tags: [], functions: [], markers: [] },
     testngSuites: [],
     cucumberRunners: [],
+    mavenProfiles: [],
+    gradleModules: [],
+    testScripts: [],
+    playwrightProjects: [],
+    monorepo: false,
     envVars: [],
     configFiles: [],
     grid: {},
@@ -431,6 +613,7 @@ export function analyzeRepo(repoPath) {
   profile.reports = uniq(profile.reports);
   profile.primaryFramework = profile.frameworks[0] || null;
   buildWarnings(profile);
+  assessConfidence(profile);
   return profile;
 }
 
@@ -439,6 +622,10 @@ export function summarizeProfile(p, limit = 40) {
   const cap = (arr) => (arr.length > limit ? [...arr.slice(0, limit), `... (+${arr.length - limit} more)`] : arr);
   const deps = p.language === "node" ? Object.keys(p.dependencies) : Object.keys(p.dependencies).filter((k) => p.dependencies[k]);
   return {
+    // first, so the caller sees what to confirm before trusting the rest
+    confidence: p.confidence,
+    assumptions: p.assumptions,
+    questions: p.questions,
     ...p,
     dependencies: cap(deps),
     tests: {

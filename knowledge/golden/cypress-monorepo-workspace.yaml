@@ -1,0 +1,46 @@
+# Cypress in a workspace package (Turborepo/npm workspaces).
+#
+# Pitfalls:
+# - Install at the repo root (the lock file lives there), run from the package folder.
+# - cacheKey uses the root lock file.
+#
+# Built by the MCP generator from test/fixtures/node-monorepo; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: node
+  version: "20"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "package-lock.json" }}'
+cacheDirectories:
+  - node_modules
+pre:
+  - npm ci
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: cd packages/e2e && find cypress -type f \( -name '*.cy.js' -o -name '*.cy.ts' -o -name '*.cy.jsx' -o -name '*.cy.tsx' \) -not -path '*/node_modules/*' | sed 's#^\./##'
+testRunnerCommand: cd packages/e2e && npx cypress run --spec "$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: CypressArtifacts
+    path:
+      - cypress/videos/**
+      - cypress/screenshots/**
+      - mochawesome-report/**
+      - cypress/reports/**
+jobLabel:
+  - cypress
+  - linux
+  - autosplit

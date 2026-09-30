@@ -1,0 +1,41 @@
+# Gradle Kotlin DSL multi-module + JUnit 5, YAML v0.2 native runner.
+#
+# Pitfalls:
+# - Gradle v0.2 runners only support remote discovery.
+# - Needs Gradle 7+, and the java plugin in each module.
+#
+# Built by the MCP generator from test/fixtures/gradle-kts; replace with a YAML verified on HyperExecute when you have one.
+version: "0.2"
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: java
+  version: "21"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  BASE_URL: <set BASE_URL>
+pre: []
+post:
+  - ls -la
+framework:
+  name: gradle/junit5
+  discoveryMode: remote
+  discoveryType: class
+  baseCommand: ./gradlew test
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - build/reports/**
+      - build/test-results/**
+jobLabel:
+  - junit5
+  - linux
+  - v0.2

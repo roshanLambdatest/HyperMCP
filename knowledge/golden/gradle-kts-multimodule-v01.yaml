@@ -1,0 +1,50 @@
+# Gradle Kotlin DSL multi-module (api-tests, ui-tests) + JUnit 5, YAML v0.1 class split.
+#
+# Pitfalls:
+# - gradle test --tests X fails in every module without X (No tests found for given includes), so each item names its module task: :module:test --tests <class>.
+# - $test is unquoted on purpose so it expands to task + filter.
+#
+# Built by the MCP generator from test/fixtures/gradle-kts; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: java
+  version: "21"
+env:
+  GRADLE_USER_HOME: gradle_cache
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  BASE_URL: <set BASE_URL>
+cacheKey: '{{ checksum "build.gradle.kts" }}'
+cacheDirectories:
+  - gradle_cache
+pre:
+  - ./gradlew clean testClasses --no-daemon
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' ui-tests/src/test/java api-tests/src/test/java | sed -E 's#^(.*)/src/test/java/(.*)\.java$#\1 \2#' | awk '{m=$1; gsub("/",":",m); c=$2; gsub("/",".",c); print m":test --tests "c}'
+testRunnerCommand: ./gradlew :$test --no-daemon
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - build/reports/**
+report: true
+partialReports:
+  location: build/test-results/test/
+  type: xml
+  frameworkName: junit
+jobLabel:
+  - junit5
+  - linux
+  - autosplit

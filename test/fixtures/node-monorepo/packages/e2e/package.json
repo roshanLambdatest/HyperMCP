@@ -1,0 +1,5 @@
+{
+  "name": "e2e",
+  "scripts": { "e2e": "cypress run" },
+  "devDependencies": { "cypress": "^13.10.0" }
+}

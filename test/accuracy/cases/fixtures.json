@@ -1,0 +1,248 @@
+[
+  {
+    "name": "maven-testng default → v0.2 class",
+    "repo": "maven-testng",
+    "expected": {
+      "language": "java",
+      "framework": "testng",
+      "yamlVersion": "0.2",
+      "v02Name": "maven/testng",
+      "discoveryType": "class",
+      "runson": "linux",
+      "env": [
+        "BASE_URL"
+      ],
+      "confidence": "high"
+    }
+  },
+  {
+    "name": "maven-testng v0.1 class split",
+    "repo": "maven-testng",
+    "options": {
+      "yamlVersion": "0.1"
+    },
+    "expected": {
+      "yamlVersion": "0.1",
+      "splitBy": "class",
+      "discovered": 2,
+      "runnerContains": [
+        "-Dtest=\"$test\""
+      ],
+      "preContains": [
+        "-Dmaven.test.skip=true"
+      ]
+    }
+  },
+  {
+    "name": "maven-testng v0.1 method split",
+    "repo": "maven-testng",
+    "options": {
+      "yamlVersion": "0.1",
+      "splitBy": "method"
+    },
+    "expected": {
+      "splitBy": "method",
+      "discovered": 3
+    }
+  },
+  {
+    "name": "maven-cucumber scenario split",
+    "repo": "maven-cucumber",
+    "options": {
+      "splitBy": "scenario"
+    },
+    "expected": {
+      "framework": "cucumber",
+      "yamlVersion": "0.1",
+      "discovered": 2,
+      "runnerContains": [
+        "-Dtest=TestRunner",
+        "-Dcucumber.features"
+      ]
+    }
+  },
+  {
+    "name": "maven-profiles asks for the profile",
+    "repo": "maven-profiles",
+    "expected": {
+      "framework": "testng",
+      "confidence": "medium",
+      "questionsInclude": [
+        "Maven profile"
+      ]
+    }
+  },
+  {
+    "name": "maven-profiles with -Psmoke (v0.1)",
+    "repo": "maven-profiles",
+    "options": {
+      "mavenProfile": "smoke",
+      "yamlVersion": "0.1"
+    },
+    "expected": {
+      "runnerContains": [
+        "-Psmoke"
+      ],
+      "preContains": [
+        "-Psmoke"
+      ],
+      "discovered": 1
+    }
+  },
+  {
+    "name": "gradle-kts multi-module v0.2",
+    "repo": "gradle-kts",
+    "expected": {
+      "language": "java",
+      "framework": "junit5",
+      "v02Name": "gradle/junit5",
+      "yamlVersion": "0.2"
+    }
+  },
+  {
+    "name": "gradle-kts multi-module v0.1 → module tasks",
+    "repo": "gradle-kts",
+    "options": {
+      "yamlVersion": "0.1"
+    },
+    "expected": {
+      "discovered": 2,
+      "runnerContains": [
+        ":$test"
+      ],
+      "runnerNotContains": [
+        "--tests \"$test\""
+      ],
+      "preContains": [
+        "./gradlew"
+      ]
+    }
+  },
+  {
+    "name": "playwright basic",
+    "repo": "playwright",
+    "expected": {
+      "language": "node",
+      "framework": "playwright",
+      "discovered": 2,
+      "runnerContains": [
+        "npx playwright test"
+      ]
+    }
+  },
+  {
+    "name": "playwright custom config + projects",
+    "repo": "playwright-projects",
+    "expected": {
+      "framework": "playwright",
+      "discovered": 2,
+      "runnerContains": [
+        "--config=e2e/pw.config.ts"
+      ],
+      "env": [
+        "TEST_ENV",
+        "BASE_URL"
+      ],
+      "questionsInclude": [
+        "Playwright project"
+      ]
+    }
+  },
+  {
+    "name": "cypress in a workspace package",
+    "repo": "node-monorepo",
+    "expected": {
+      "language": "node",
+      "framework": "cypress",
+      "discovered": 2,
+      "runnerContains": [
+        "cd packages/e2e"
+      ],
+      "preContains": [
+        "npm ci"
+      ]
+    }
+  },
+  {
+    "name": "pytest method split",
+    "repo": "pytest",
+    "options": {
+      "splitBy": "method"
+    },
+    "expected": {
+      "framework": "pytest",
+      "discovered": 2
+    }
+  },
+  {
+    "name": "pytest pyproject-only + xdist addopts",
+    "repo": "pyproject-only",
+    "expected": {
+      "language": "python",
+      "framework": "pytest",
+      "discovered": 1,
+      "runnerContains": [
+        "-n 0"
+      ],
+      "preContains": [
+        "pip3 install -e \".[test]\""
+      ],
+      "env": [
+        "APP_URL"
+      ]
+    }
+  },
+  {
+    "name": "dotnet nunit v0.2 method",
+    "repo": "dotnet-nunit",
+    "options": {
+      "splitBy": "method"
+    },
+    "expected": {
+      "language": "csharp",
+      "framework": "nunit",
+      "v02Name": "dotnet/nunit",
+      "discoveryType": "method"
+    }
+  },
+  {
+    "name": "cypress 9 (cypress/integration)",
+    "repo": "cypress-legacy",
+    "expected": {
+      "framework": "cypress",
+      "discovered": 2,
+      "runnerContains": [
+        "--spec"
+      ]
+    }
+  },
+  {
+    "name": "spock groovy specs (v0.1)",
+    "repo": "spock-groovy",
+    "options": {
+      "yamlVersion": "0.1"
+    },
+    "expected": {
+      "framework": "spock",
+      "discovered": 1
+    }
+  },
+  {
+    "name": "spock groovy specs (v0.2)",
+    "repo": "spock-groovy",
+    "expected": {
+      "v02Name": "gradle/spock"
+    }
+  },
+  {
+    "name": "pytest files without test_ names + requirement.txt",
+    "repo": "pytest-content",
+    "expected": {
+      "framework": "pytest",
+      "discovered": 1,
+      "preContains": [
+        "-r requirement.txt"
+      ]
+    }
+  }
+]

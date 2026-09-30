@@ -1,0 +1,9 @@
+{
+  "name": "pw-projects",
+  "private": true,
+  "scripts": {
+    "test:e2e": "cross-env TEST_ENV=staging playwright test --config=e2e/pw.config.ts",
+    "test": "npm run test:e2e"
+  },
+  "devDependencies": { "@playwright/test": "^1.45.0", "cross-env": "^7.0.3" }
+}

@@ -9,3 +9,5 @@ vscode-extension/knowledge/
 target/
 .fake-runs
 .hyperexecute-rerun.yaml
+test/accuracy/last-report.json
+vscode-extension/.build/

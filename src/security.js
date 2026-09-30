@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { loadCreds } from "./credentials.js";
 
 const IGNORED = new Set(["node_modules", ".git", "target", "build", "dist", "out", "bin", "obj", ".gradle", ".idea", ".vscode", "venv", ".venv", "__pycache__", "allure-results", "allure-report", "test-output", "playwright-report", "test-results", "coverage"]);
 const TEXT_EXT = /\.(java|kt|groovy|py|robot|[cm]?[jt]sx?|cs|rb|php|properties|ya?ml|json|env|conf|ini|cfg|toml|xml|feature|runsettings|config|txt)$|(^|\/)\.env[\w.-]*$/;
@@ -67,13 +68,17 @@ function lineOf(text, index) {
 export function scanCredentials(repoPath) {
   const root = path.resolve(repoPath);
   const findings = [];
+  const own = loadCreds();
+  const ownValues = own ? [own.accessKey, own.username].filter((v) => v && v.length >= 4) : [];
   for (const rel of walk(root)) {
     const text = read(root, rel);
     if (!text) continue;
     const ext = rel.split(".").pop();
     const lang = CODE_LANG[ext] || "config";
     const mentionsLT = /lambdatest|testmuai|LT:Options|lt:options|LT_USERNAME|LT_ACCESS_KEY/i.test(text);
-    const push = (f) => findings.push({ file: rel, lang, ...f });
+    const heYaml = /\.ya?ml$/.test(rel) && /^runson\s*:/m.test(text);
+    // your own saved account in a HyperExecute YAML is put there on purpose (see generator embeddedCredentials)
+    const push = (f) => { if (heYaml && ownValues.some((v) => String(f.match || "").includes(v))) return; findings.push({ file: rel, lang, ...f }); };
 
     for (const m of text.matchAll(HUB_CREDS)) {
       if (isPlaceholder(m[2]) && isPlaceholder(m[3])) continue;

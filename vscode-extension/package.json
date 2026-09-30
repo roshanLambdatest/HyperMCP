@@ -2,7 +2,7 @@
   "name": "hyperexecute-yaml-studio",
   "displayName": "HyperExecute YAML Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {
@@ -146,7 +146,8 @@
   },
   "scripts": {
     "sync": "node scripts/sync-core.js",
-    "package": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-yaml-studio.vsix"
+    "package": "node scripts/build-protected.js",
+    "package:dev": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-yaml-studio.vsix"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.129.0",
@@ -161,5 +162,9 @@
   "homepage": "https://github.com/roshanLambdatest/HyperMCP#readme",
   "bugs": {
     "url": "https://github.com/roshanLambdatest/HyperMCP/issues"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "javascript-obfuscator": "^4.2.2"
   }
 }

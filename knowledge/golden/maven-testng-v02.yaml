@@ -1,0 +1,45 @@
+# Maven + TestNG, YAML v0.2 native runner (class split).
+#
+# Pitfalls:
+# - v0.2 must NOT have a testDiscovery block: it silently routes to v0.1 and runs 0 tests.
+# - Split by suite with splitBy suite (discoveryType xmltest) when the suite XML carries parameters or listeners.
+#
+# Built by the MCP generator from test/fixtures/maven-testng; replace with a YAML verified on HyperExecute when you have one.
+version: "0.2"
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: java
+  version: "17"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  BASE_URL: <set BASE_URL>
+pre:
+  - mvn dependency:resolve
+post:
+  - ls -la
+framework:
+  name: maven/testng
+  discoveryMode: remote
+  discoveryType: class
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - target/surefire-reports/**
+report: true
+partialReports:
+  location: target/surefire-reports/html
+  type: html
+  frameworkName: testng
+jobLabel:
+  - testng
+  - linux
+  - v0.2

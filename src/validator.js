@@ -18,6 +18,57 @@ const KNOWN_KEYS = new Set([
   "generateArtifactAfterEveryStage", "taskIdentifierInNonConflictingArtifacts", "errorCategorizedOnFailureOnly", "framework",
   "jobID", "retryOnFailureOnly", "idleTimeout", "autosplitStrategy", "sequential", "testSuiteStepTimeout",
 ]);
+// Expected value types for the keys we know, so a wrong shape fails here instead of on the platform.
+const TYPES = {
+  version: "number|string", runson: "string", pre: "list", post: "list", autosplit: "bool", concurrency: "int", parallelism: "int",
+  macParallelism: "int", winParallelism: "int", linuxParallelism: "int", matrix: "map", testDiscovery: "map", testRunnerCommand: "string",
+  linuxTestRunnerCommand: "string", macTestRunnerCommand: "string", winTestRunnerCommand: "string", testSuites: "list", runtime: "map|list",
+  cacheKey: "string", cacheDirectories: "list", env: "map", retryOnFailure: "bool", maxRetries: "int", failFast: "map|bool", report: "bool",
+  partialReports: "map|list", uploadArtefacts: "list", mergeArtifacts: "bool", errorCategorizedReport: "map|bool", globalTimeout: "int",
+  testSuiteTimeout: "int", testSuiteStep: "int", jobLabel: "list", tunnel: "bool", tunnelOpts: "map", tunnelNames: "list",
+  differentialUpload: "map|bool", framework: "map", idleTimeout: "int", vars: "map", background: "list", dynamicAllocation: "bool",
+  exclusionMatrix: "list", combineTasksInMatrixMode: "bool", alwaysRunPostSteps: "bool", sourcePayload: "map", hostsOverride: "list",
+  retryOnFailureOnly: "bool", strict: "bool", project: "map|string",
+};
+const typeOf = (v) => (Array.isArray(v) ? "list" : v === null ? "null" : Number.isInteger(v) ? "int" : typeof v === "number" ? "number" : typeof v === "boolean" ? "bool" : typeof v === "object" ? "map" : "string");
+const typeOk = (v, want) => want.split("|").some((t) => t === typeOf(v) || (t === "number" && typeOf(v) === "int"));
+
+// Optional official schema: HE_YAML_SCHEMA=/path/to/schema.json (JSON Schema subset: type, enum, properties,
+// required, items, additionalProperties:false, minimum, maximum). Lets the rules follow LambdaTest's own schema when available.
+let schemaCache;
+function loadSchema() {
+  if (schemaCache !== undefined) return schemaCache;
+  schemaCache = null;
+  const p = process.env.HE_YAML_SCHEMA;
+  if (p && fs.existsSync(p)) {
+    try { schemaCache = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+  }
+  return schemaCache;
+}
+export function checkSchema(value, schema, at = "", out = []) {
+  if (!schema || typeof schema !== "object") return out;
+  const jt = (v) => (Array.isArray(v) ? "array" : v === null ? "null" : Number.isInteger(v) ? "integer" : typeof v === "object" ? "object" : typeof v);
+  if (schema.type) {
+    const types = [].concat(schema.type);
+    const t = jt(value);
+    if (!types.includes(t) && !(t === "integer" && types.includes("number"))) { out.push(`${at || "(root)"} should be ${types.join(" or ")}, got ${t}`); return out; }
+  }
+  if (schema.enum && !schema.enum.includes(value)) out.push(`${at} must be one of ${schema.enum.join(", ")}`);
+  if (typeof value === "number") {
+    if (schema.minimum !== undefined && value < schema.minimum) out.push(`${at} must be >= ${schema.minimum}`);
+    if (schema.maximum !== undefined && value > schema.maximum) out.push(`${at} must be <= ${schema.maximum}`);
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const r of schema.required || []) if (!(r in value)) out.push(`${at ? at + "." : ""}${r} is required`);
+    for (const [k, v] of Object.entries(value)) {
+      if (schema.properties?.[k]) checkSchema(v, schema.properties[k], at ? `${at}.${k}` : k, out);
+      else if (schema.additionalProperties === false) out.push(`${at ? at + "." : ""}${k} is not allowed`);
+    }
+  }
+  if (Array.isArray(value) && schema.items) value.forEach((v, i) => checkSchema(v, schema.items, `${at}[${i}]`, out));
+  return out;
+}
+
 const V02_NAMES = ["maven/testng", "maven/junit4", "maven/junit5", "maven/spock", "gradle/testng", "gradle/junit4", "gradle/junit5", "gradle/junit6", "gradle/spock", "dotnet/mstest", "dotnet/nunit"];
 const RUNSON = ["linux", "mac", "mac13", "win", "win11"];
 const REPORT_FRAMEWORKS = ["extent", "extent-native", "testng", "cucumber", "junit", "allure", "playwright", "specflow", "karate", "robot", "katalon", "cypress"];
@@ -33,6 +84,7 @@ function lev(a, b) {
 const suggest = (k) => [...KNOWN_KEYS].map((x) => [x, lev(k, x)]).sort((a, b) => a[1] - b[1]).find(([, d]) => d <= 3)?.[0];
 
 export function validateYaml(text, repoPath) {
+  const list = (v) => (Array.isArray(v) ? v : v == null ? [] : [String(v)]);
   const errors = [];
   const warnings = [];
   const info = [];
@@ -54,6 +106,12 @@ export function validateYaml(text, repoPath) {
       warnings.push(`Unknown top-level key "${k}"${s ? ` — did you mean "${s}"?` : ""}`);
     }
   }
+
+  for (const [k, v] of Object.entries(doc)) {
+    if (TYPES[k] && v !== null && !typeOk(v, TYPES[k])) errors.push(`\`${k}\` should be ${TYPES[k].replace(/\|/g, " or ")}, got ${typeOf(v)}${typeOf(v) === "string" && TYPES[k] === "int" ? ` ("${v}" — remove the quotes)` : ""}.`);
+  }
+  const schema = loadSchema();
+  if (schema) for (const e of checkSchema(doc, schema)) errors.push(`schema: ${e}`);
 
   // mandatory
   if (doc.version === undefined) errors.push("Missing `version` (use 0.1).");
@@ -117,7 +175,7 @@ export function validateYaml(text, repoPath) {
     if (!doc.testSuites && !isAuto) errors.push("matrix mode requires `testSuites`.");
     if (doc.testSuites && !Array.isArray(doc.testSuites)) errors.push("`testSuites` must be a list.");
     for (const [k, v] of Object.entries(doc.matrix)) if (!Array.isArray(v)) errors.push(`matrix.${k} must be a list.`);
-    const used = new Set((doc.testSuites || []).join(" ").match(/\$(\w+)/g)?.map((m) => m.slice(1)) || []);
+    const used = new Set(list(doc.testSuites).join(" ").match(/\$(\w+)/g)?.map((m) => m.slice(1)) || []);
     for (const k of Object.keys(doc.matrix)) if (k !== "os" && !used.has(k)) info.push(`matrix.${k} isn't referenced in testSuites — fine if tests read it as an env var, otherwise it only multiplies tasks.`);
     for (const u of used) if (!(u in doc.matrix) && !(doc.env && u in doc.env) && !["RANDOM", "CACHE_DIR", "HOME", "PATH"].includes(u)) warnings.push(`testSuites uses $${u} which is not a matrix key or env var.`);
     const combos = Object.values(doc.matrix).filter(Array.isArray).reduce((n, v) => n * v.length, 1);
@@ -137,7 +195,7 @@ export function validateYaml(text, repoPath) {
   if (doc.cacheKey && !/\{\{\s*checksum\s+"[^"]+"\s*\}\}/.test(doc.cacheKey)) warnings.push(`cacheKey "${doc.cacheKey}" — usual form is '{{ checksum "pom.xml" }}'.`);
   if (doc.cacheKey && !doc.cacheDirectories) warnings.push("cacheKey set but no cacheDirectories.");
   if (doc.cacheDirectories && !Array.isArray(doc.cacheDirectories)) errors.push("`cacheDirectories` must be a list.");
-  const preText = (doc.pre || []).join(" ");
+  const preText = list(doc.pre).join(" ");
   if (!isV02 && preText.includes("mvn") && !preText.includes("maven.repo.local")) warnings.push("Maven in `pre` without -Dmaven.repo.local=<cache dir> — the .m2 cache won't be reused between runs.");
   if ((doc.testRunnerCommand || "").includes("mvn") && doc.env?.CACHE_DIR && !String(doc.testRunnerCommand).includes("maven.repo.local"))
     warnings.push("testRunnerCommand runs mvn without -Dmaven.repo.local=$CACHE_DIR — it will re-download dependencies.");
@@ -145,7 +203,8 @@ export function validateYaml(text, repoPath) {
   // env / secrets
   for (const [k, v] of Object.entries(doc.env || {})) {
     const s = String(v);
-    if (/(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && s && !s.includes("secrets.") && !s.startsWith("$") && !s.startsWith("<")) warnings.push(`env.${k} looks like a hard-coded secret — use \${{ .secrets.${k} }}.`);
+    if (k === "LT_ACCESS_KEY" && s && !s.includes("secrets.") && !s.startsWith("$") && !s.startsWith("<")) info.push("env.LT_ACCESS_KEY holds a LambdaTest access key — keep this file out of shared repos.");
+    else if (/(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && s && !s.includes("secrets.") && !s.startsWith("$") && !s.startsWith("<")) warnings.push(`env.${k} looks like a hard-coded secret — use \${{ .secrets.${k} }}.`);
     if (s.startsWith("<set ")) errors.push(`env.${k} still has a placeholder value.`);
   }
 
@@ -170,7 +229,7 @@ export function validateYaml(text, repoPath) {
     const root = path.resolve(repoPath);
     const ck = String(doc.cacheKey || "").match(/checksum\s+"([^"]+)"/)?.[1];
     if (ck && !fs.existsSync(path.join(root, ck))) errors.push(`cacheKey checksums "${ck}", which doesn't exist in the repo.`);
-    const cmds = [doc.testDiscovery?.command, doc.testRunnerCommand, ...(doc.testSuites || []), ...(doc.pre || [])].filter(Boolean).join(" ");
+    const cmds = [doc.testDiscovery?.command, doc.testRunnerCommand, ...list(doc.testSuites), ...list(doc.pre)].filter(Boolean).join(" ");
     const cdDir = cmds.match(/\bcd\s+([^\s&;]+)\s*&&/)?.[1] || doc.framework?.workingDirectory || "";
     if (/\.\/mvnw\b/.test(cmds) && !fs.existsSync(path.join(root, cdDir, "mvnw"))) errors.push("Commands use ./mvnw but the project has no mvnw.");
     if (/\.\/gradlew\b/.test(cmds) && !fs.existsSync(path.join(root, "gradlew"))) errors.push("Commands use ./gradlew but the repo has no gradlew.");

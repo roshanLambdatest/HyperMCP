@@ -1,6 +1,6 @@
 {
   "name": "hyperexecute-yaml-mcp",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "MCP server that analyzes a test-automation repo and generates / validates HyperExecute YAML",
   "type": "module",
   "main": "src/index.js",
@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js",
+    "accuracy": "node test/accuracy/run.js",
+    "feedback": "node scripts/feedback-report.js"
   },
   "engines": {
     "node": ">=18"

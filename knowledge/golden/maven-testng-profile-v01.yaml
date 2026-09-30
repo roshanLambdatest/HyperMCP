@@ -1,0 +1,49 @@
+# Maven + TestNG where a Maven profile picks the suite (-Psmoke), YAML v0.1 class split.
+#
+# Pitfalls:
+# - Profiles that set suiteXmlFiles change what mvn test runs: pass the profile to pre and the runner.
+# - A hard-coded <suiteXmlFile> ignores -Dsurefire.suiteXmlFiles; use a ${suiteXmlFile} property for suite splitting.
+#
+# Built by the MCP generator from test/fixtures/maven-profiles; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: java
+  version: "11"
+env:
+  CACHE_DIR: m2_cache_dir
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "pom.xml" }}'
+cacheDirectories:
+  - $CACHE_DIR
+pre:
+  - mvn -Psmoke -Dmaven.repo.local=$CACHE_DIR -Dmaven.test.skip=true clean install
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' src/test/java | sed -E 's#^.*src/test/java/##; s#\.java$##; s#/#.#g'
+testRunnerCommand: mvn test -Psmoke -Dmaven.repo.local=$CACHE_DIR -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - target/surefire-reports/**
+report: true
+partialReports:
+  location: target/surefire-reports/html
+  type: html
+  frameworkName: testng
+jobLabel:
+  - testng
+  - linux
+  - autosplit

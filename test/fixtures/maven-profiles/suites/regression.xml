@@ -1,0 +1,7 @@
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<suite name="regression">
+  <parameter name="browser" value="chrome"/>
+  <test name="regression-tests">
+    <classes><class name="com.shop.CheckoutTest"/></classes>
+  </test>
+</suite>

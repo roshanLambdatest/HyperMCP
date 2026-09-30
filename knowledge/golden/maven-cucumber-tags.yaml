@@ -1,0 +1,47 @@
+# Maven + Cucumber split by tag (matrix).
+#
+# Pitfalls:
+# - Cucumber 5+ uses -Dcucumber.filter.tags; older versions use -Dcucumber.options="--tags ...".
+# - The runner class needs a json: plugin so partialReports has Cucumber JSON.
+#
+# Built by the MCP generator from test/fixtures/maven-cucumber; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+env:
+  CACHE_DIR: m2_cache_dir
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "pom.xml" }}'
+cacheDirectories:
+  - $CACHE_DIR
+pre:
+  - mvn -Dmaven.repo.local=$CACHE_DIR -Dmaven.test.skip=true clean install
+post:
+  - ls -la
+matrix:
+  tag:
+    - "@smoke"
+    - "@regression"
+testSuites:
+  - mvn test -Dmaven.repo.local=$CACHE_DIR -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false -Dtest=TestRunner -Dcucumber.filter.tags="$tag"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - target/cucumber-reports/**
+      - target/surefire-reports/**
+report: true
+partialReports:
+  location: target/cucumber-reports/
+  type: json
+  frameworkName: cucumber
+jobLabel:
+  - cucumber
+  - linux
+  - matrix

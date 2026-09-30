@@ -1,0 +1,50 @@
+# pytest with only pyproject.toml (test extras) and -n auto in addopts.
+#
+# Pitfalls:
+# - No requirements.txt: install the project with its test extras.
+# - addopts -n auto would start xdist workers on every VM: the runner passes -n 0.
+# - Discovery follows [tool.pytest.ini_options] testpaths.
+#
+# Built by the MCP generator from test/fixtures/pyproject-only; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: python
+  version: "3.11"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  APP_URL: <set APP_URL>
+cacheKey: '{{ checksum "pyproject.toml" }}'
+cacheDirectories:
+  - pip_cache
+pre:
+  - pip3 install -e ".[test]" --cache-dir pip_cache
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: find tests -type f \( -name 'test_*.py' -o -name '*_test.py' \) -not -path '*/venv/*' -not -path '*/.venv/*' -not -path '*/site-packages/*' | sed 's#^\./##'
+testRunnerCommand: python3 -m pytest "$test" -n 0 --junitxml=reports/junit-$RANDOM.xml
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - reports/**
+report: true
+partialReports:
+  location: reports/
+  type: xml
+  frameworkName: junit
+jobLabel:
+  - pytest
+  - linux
+  - autosplit

@@ -9,18 +9,20 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import YAML from "yaml";
 import { analyzeRepo, summarizeProfile } from "./analyzer.js";
-import { generateYaml, v02FrameworkName } from "./generator.js";
+import { generateYaml, v02FrameworkName, embeddedCredentials } from "./generator.js";
 import { ensureCli, startRun } from "./runner.js";
 import { loadCreds, saveCreds, verifyCreds, CREDS_FILE } from "./credentials.js";
 import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis, buildTargetedRerun, fixableSelectors } from "./doctor.js";
 import { validateYaml } from "./validator.js";
-import { searchKnowledge, listTopics, getTopic, KB_DIRS } from "./knowledge.js";
+import { searchKnowledge, listTopics, getTopic, KB_DIRS, cacheConfluencePage, cacheStatus } from "./knowledge.js";
 import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
 import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } from "./security.js";
 import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
+import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir } from "./feedback.js";
+import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.6.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.7.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -35,7 +37,7 @@ server.registerTool(
   {
     title: "Analyze automation repo",
     description:
-      "Scan a test-automation repository and detect language, build tool, test framework (TestNG, JUnit, Cucumber, Playwright, Cypress, WebdriverIO, pytest, Behave, Robot, NUnit, SpecFlow…), test classes/files/features/scenarios, tags, env vars the code reads, grid/hub usage, reports and existing HyperExecute YAMLs. Run this first.",
+      "Scan a test-automation repo: language, build tool, framework (TestNG, JUnit, Cucumber, Playwright, Cypress, WebdriverIO, pytest, Behave, Robot, NUnit, SpecFlow…), test classes/files/features, tags, env vars the code reads, grid usage, Maven profiles, Gradle modules, workspace packages, npm test scripts, existing HyperExecute YAMLs. Returns confidence (high/medium/low), assumptions and questions first. USE FIRST on any repo. If confidence is not high, show the assumptions and ASK the questions before generating — don't guess. Not for YAML linting (validate_hyperexecute_yaml).",
     inputSchema: { repoPath: z.string().optional().describe("Absolute path to the repo (defaults to the workspace folder)") },
   },
   async ({ repoPath }) => {
@@ -52,7 +54,7 @@ server.registerTool(
   {
     title: "Generate HyperExecute YAML",
     description:
-      "Generate a HyperExecute YAML for the repo from its detected framework. Supports autosplit (dynamic test discovery) and matrix modes, split by class/method/suite/tag (Java), feature/scenario/tag (Cucumber/Behave), file/tag (JS, Robot), file/method/tag (pytest). Returns the YAML plus notes/warnings; optionally writes it into the repo. Call search_knowledge_base first when the user has special requirements.",
+      "Build a HyperExecute YAML from the detected stack. USE after analyze_repo, once its questions are answered. Defaults are good: autosplit by class/file/feature, v0.2 native runner for Maven/Gradle TestNG/JUnit/Spock and .NET NUnit/MSTest. Only pass options the user asked for or analyze_repo's questions resolved, e.g. {splitBy:\"tag\"} for tags, {mavenProfile:\"smoke\"}, {extraMatrix:{project:[\"chromium\",\"firefox\"]}} for Playwright projects, {runsonMatrix:[\"linux\",\"win\"], executionMode:\"matrix\"} for multi-OS. Returns the YAML, notes, warnings and validation; write:true saves it. DON'T use to fix a failed run (use fix_and_rerun_hyperexecute) or to tune an existing YAML (optimize_hyperexecute_yaml).",
     inputSchema: {
       repoPath: z.string().optional(),
       framework: z.string().optional().describe("Override detected framework: testng | junit5 | junit4 | spock | cucumber | playwright | cypress | webdriverio | cucumber-js | jest | mocha | nightwatch | testcafe | pytest | behave | robot | nunit | xunit | mstest | specflow"),
@@ -76,6 +78,8 @@ server.registerTool(
       discoveryCommand: z.string().optional().describe("Override the discovery command"),
       discoveryMode: z.enum(["local", "remote"]).optional(),
       runnerClass: z.string().optional().describe("Cucumber (Java) runner class to use"),
+      embedCredentials: z.boolean().optional().describe("Default true: put the saved LambdaTest account into LT_USERNAME / LT_ACCESS_KEY. false keeps ${{ .secrets.* }} references (safe to commit)"),
+      mavenProfile: z.string().optional().describe("Maven profile id to pass as -P<id> to every mvn command (see analyze_repo mavenProfiles)"),
       tunnel: z.boolean().optional().describe("Enable LambdaTest tunnel for internal URLs"),
       jobLabel: z.array(z.string()).optional(),
       includeRuntime: z.boolean().optional(),
@@ -96,15 +100,21 @@ server.registerTool(
         fs.writeFileSync(out, result.yaml);
         written = out;
       }
+      // the written file has the real key; the chat only sees it masked
+      const key = embeddedCredentials(args)?.accessKey;
+      const shown = key ? result.yaml.split(key).join(key.slice(0, 3) + "****") : result.yaml;
       return text(
         [
           "```yaml",
-          result.yaml.trimEnd(),
+          shown.trimEnd(),
           "```",
           written ? `\nWritten to: ${written}` : "",
           `\nYAML v${result.yamlVersion} | framework: ${result.framework} | mode: ${result.executionMode} | split: ${result.splitBy} (supported: ${result.supportedSplits.join(", ")})`,
           result.notes.length ? `\nNotes:\n- ${result.notes.join("\n- ")}` : "",
           result.warnings.length ? `\nWarnings:\n- ${result.warnings.join("\n- ")}` : "",
+          profile.confidence?.level !== "high" ? `\nConfidence: ${profile.confidence.level} (${profile.confidence.reasons.join("; ")})` : "",
+          profile.assumptions?.length ? `\nAssumptions:\n- ${profile.assumptions.join("\n- ")}` : "",
+          profile.questions?.length ? `\nConfirm with the user:\n- ${profile.questions.join("\n- ")}` : "",
           `\nValidation: ${validation.valid ? "OK" : "ISSUES"}`,
           validation.errors.length ? `- errors: ${validation.errors.join(" | ")}` : "",
           validation.warnings.length ? `- warnings: ${validation.warnings.join(" | ")}` : "",
@@ -123,7 +133,7 @@ server.registerTool(
   "validate_hyperexecute_yaml",
   {
     title: "Validate HyperExecute YAML",
-    description: "Lint a HyperExecute YAML (file path or inline content): schema keys, typos, runson values, autosplit/matrix consistency, $test usage, retries/timeouts, cache config, hard-coded secrets, report config, and repo-aware checks (files referenced exist).",
+    description: "Lint a HyperExecute YAML (file or inline): unknown keys/typos, value types, runson, v0.1/v0.2 rules (incl. the v0.2 testDiscovery 0-tests trap), autosplit/matrix consistency, $test usage, retries/timeouts, cache, hard-coded secrets, reports, and files the commands reference. Uses HE_YAML_SCHEMA too when set. USE on any YAML the user wrote or edited, and before fix_and_rerun with yamlContent. Static only — it doesn't run anything (dry_run_test_discovery does).",
     inputSchema: {
       yamlPath: z.string().optional(),
       yamlContent: z.string().optional(),
@@ -155,7 +165,7 @@ server.registerTool(
   {
     title: "Dry-run test discovery",
     description:
-      "Run the testDiscovery command locally in the repo (from a YAML file or an explicit command) and show what HyperExecute will split on, plus how the first tasks' runner commands expand. Read-only commands only; runs with bash in the repo directory.",
+      "Run the YAML's testDiscovery command locally (bash, in the repo) and show the discovered items, duplicates and how the first tasks expand. USE after generating a v0.1 YAML and before the first run; the count is remembered and compared with what HyperExecute actually discovers. Not for v0.2 (discovery happens on HyperExecute) or matrix YAMLs.",
     inputSchema: {
       repoPath: z.string().optional(),
       yamlPath: z.string().optional().describe("YAML to read testDiscovery/testRunnerCommand from (default hyperexecute.yaml)"),
@@ -178,6 +188,8 @@ server.registerTool(
       const r = await sh(command, repo);
       const items = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       const dupes = items.length - new Set(items).size;
+      // Remembered so the real run can be compared with it (see discoveryCheck in get_hyperexecute_run).
+      if (r.code === 0) saveDryRun(repo, yamlPath || "hyperexecute.yaml", { command, discovered: items.length, items });
       return text({
         command,
         exitCode: r.code,
@@ -201,7 +213,7 @@ server.registerTool(
   {
     title: "Search HyperExecute knowledge base",
     description:
-      "Search HyperExecute knowledge: the bundled YAML reference / framework recipes / troubleshooting notes, plus the live Confluence space (default HYP on lambdatest.atlassian.net) when Atlassian credentials are configured. Use for YAML keys, framework-specific setup, report config, tunnel, secrets, errors, customer-specific conventions.",
+      "Search HyperExecute knowledge: bundled YAML reference, framework recipes, troubleshooting, golden example YAMLs (knowledge/golden), cached Confluence pages, and live Confluence (HYP) when credentials are set. Understands synonyms (\"tests not found\" ≈ \"0 tests discovered\"). USE before generating for special requirements (tunnel, reports, secrets, mobile, tags) and when a diagnosis is unknown. Example: {query:\"cucumber tags gradle\"}.",
     inputSchema: {
       query: z.string(),
       source: z.enum(["all", "local", "confluence"]).optional().describe("Default all"),
@@ -210,7 +222,7 @@ server.registerTool(
   },
   async ({ query, source = "all", limit = 6 }) => {
     const out = {};
-    if (source !== "confluence") out.local = searchKnowledge(query, limit).map(({ topic, section, text }) => ({ topic, section, text: text.slice(0, 4000) }));
+    if (source !== "confluence") out.local = searchKnowledge(query, limit).map(({ topic, section, text, source, score }) => ({ topic, section, source, score, text: text.slice(0, 4000) }));
     if (source !== "local") {
       const cfg = confluenceConfig();
       if (!cfg.configured) out.confluence = { configured: false, note: "Set ATLASSIAN_EMAIL + ATLASSIAN_API_TOKEN in the MCP server env to search Confluence." };
@@ -219,7 +231,7 @@ server.registerTool(
           out.confluence = { space: cfg.spaces, results: await searchConfluence(query, { limit }) };
           if (out.confluence.results.length) out.confluence.tip = "Call get_confluence_page with an id to read the full page.";
         } catch (e) {
-          out.confluence = { error: e.message };
+          out.confluence = { error: e.message, note: `Local results include ${cacheStatus().pages} cached Confluence page(s).` };
         }
       }
     }
@@ -232,11 +244,18 @@ server.registerTool(
   {
     title: "Read Confluence page",
     description: "Fetch the full content of a Confluence page (by id or URL) from the configured knowledge-base space, converted to text with code/YAML blocks preserved.",
-    inputSchema: { idOrUrl: z.string(), maxChars: z.number().int().optional() },
+    inputSchema: {
+      idOrUrl: z.string(),
+      maxChars: z.number().int().optional(),
+      cache: z.boolean().optional().describe("Default true: save the page to the local KB cache so it is searchable offline and without Atlassian credentials"),
+    },
   },
-  async ({ idOrUrl, maxChars }) => {
+  async ({ idOrUrl, maxChars, cache = true }) => {
     try {
-      return text(await getConfluencePage(idOrUrl, { maxChars }));
+      const page = await getConfluencePage(idOrUrl, { maxChars: 200000 });
+      const cached = cache ? cacheConfluencePage(page) : null;
+      const limit = maxChars || 30000;
+      return text({ ...page, content: page.content.slice(0, limit), truncated: page.content.length > limit, cachedTo: cached || undefined });
     } catch (e) {
       return fail(e);
     }
@@ -264,7 +283,7 @@ server.registerTool(
         confluence.connection = e.message;
       }
     }
-    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluence });
+    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), confluence });
   }
 );
 
@@ -427,6 +446,13 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     rec.diagnosis = diagnose({ evidence, yamlText, profile, exitCode: r.exitCode, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
     rec.evidence = { files: evidence.files, digest: logDigest(evidence.text) };
     rec.status = r.stopped ? "stopped" : rec.diagnosis.status;
+    rec.discoveryCheck = checkDiscovery({ repo, yamlPath: mainConfig, yamlText, profile, output: r.output, tests: evidence.tests, targeted: rec.targeted });
+    // A green job that ran nothing is the expensive failure — don't report it as passed.
+    if (rec.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(rec.status)) rec.status = "needs-attention";
+    if (!r.stopped) {
+      rec.feedbackFile = recordUnmatched({ source: "run", runId: id, diagnosis: { ...rec.diagnosis, status: rec.status }, logText: evidence.text, profile, yamlText });
+      recordOutcome({ event: "result", runId: id, parent, attempt, status: rec.status, ruleIds: rec.diagnosis.diagnoses.map((d) => d.id), discovery: rec.discoveryCheck.verdict, framework: profile.primaryFramework });
+    }
   });
   runs.set(id, rec);
   return rec;
@@ -443,11 +469,14 @@ function runView(rec, tailChars = 3000) {
     jobUrl: d?.jobUrl || (rec.tail.match(/https:\/\/[\w.-]*hyperexecute[\w.-]*\/[^\s"')]+/i) || [])[0] || null,
     targetedRerun: rec.targeted || undefined,
     diagnosis: d,
+    discoveryCheck: rec.discoveryCheck && rec.discoveryCheck.verdict !== "ok" ? rec.discoveryCheck : rec.discoveryCheck ? { verdict: "ok", platformDiscovered: rec.discoveryCheck.platformDiscovered, executedTests: rec.discoveryCheck.executedTests } : undefined,
+    savedForReview: rec.feedbackFile ? "The unexplained part of this failure was saved (masked) for rule review — see review_diagnosis_feedback." : undefined,
     logFiles: rec.evidence?.files,
     logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
     logDigest: rec.status !== "running" && d && ["unknown", "needs-attention"].includes(d.status) ? rec.evidence?.digest : undefined,
     next:
       rec.status === "running" ? "Call get_hyperexecute_run again in a minute or two." :
+      rec.discoveryCheck?.verdict === "zero-tests" && rec.status !== "fixable" ? "The job ran 0 tests. Fix discovery (dry_run_test_discovery, validate_hyperexecute_yaml), then rerun with fix_and_rerun_hyperexecute and yamlContent." :
       rec.status === "fixable" ? "Call fix_and_rerun_hyperexecute with this runId to apply the YAML fixes and start the next attempt." :
       rec.status === "fixable-tests" ? "Some tests failed for YAML/environment reasons (see diagnosis.tests.list). Call fix_and_rerun_hyperexecute — it fixes the YAML and reruns only those tests; code failures are left alone." :
       rec.status === "needs-input" ? `Tests need environment values the YAML doesn't have: ${(d?.needsValue || []).join(", ")}. Ask the user for them, then call fix_and_rerun_hyperexecute with values.` :
@@ -514,7 +543,7 @@ server.registerTool(
   "get_hyperexecute_run",
   {
     title: "Check a watched HyperExecute run",
-    description: "Status of a run started by run_hyperexecute_job: live log tail while running; when finished, the diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed fixes. waitSeconds (max 240) blocks until the run finishes or the wait elapses.",
+    description: "Status of a run from run_hyperexecute_job: live log tail while running; when finished, the diagnosis (passed / fixable / fixable-tests / needs-input / test-failures / auth-error / needs-attention / unknown) with proposed fixes, plus discoveryCheck comparing expected vs actual discovered/executed tests (a 0-test \"pass\" is reported as needs-attention). waitSeconds (max 240) blocks until done. Follow the returned `next`.",
     inputSchema: { runId: z.string(), waitSeconds: z.number().int().min(0).max(240).optional() },
   },
   async ({ runId, waitSeconds = 0 }) => {
@@ -531,7 +560,7 @@ server.registerTool(
   {
     title: "Apply fixes and rerun",
     description:
-      "Apply the YAML fixes from a finished run's diagnosis (all, or the listed fixIds) — or your own yamlContent — write the YAML, validate it, and start the next attempt. Refuses when the diagnosis is test failures or a login problem, and after maxAttempts (default 3).",
+      "Apply a finished run's proposed YAML fixes (all, or fixIds) — or your own validated yamlContent — write the YAML and start the next attempt; when only some tests failed for YAML reasons, reruns just those. Pass values:{VAR:\"...\"} for needsValue env vars (ask the user, never invent). REFUSES for test-failures (code bugs), auth errors and after maxAttempts (default 3). Every fix and override is logged for review_diagnosis_feedback.",
     inputSchema: {
       runId: z.string(),
       fixIds: z.array(z.string()).optional(),
@@ -569,6 +598,7 @@ server.registerTool(
       if (!v.valid) throw new Error(`Fixed YAML doesn't validate: ${v.errors.join(" | ")}`);
       fs.writeFileSync(file, next);
       const out = { applied, written: file };
+      const ruleIds = (rec.diagnosis?.diagnoses || []).map((x) => x.id).concat((rec.diagnosis?.tests?.list || []).map((t) => t.rule).filter(Boolean));
       if (rerun) {
         const d = rec.diagnosis;
         const sels = d ? fixableSelectors(d, values) : [];
@@ -585,6 +615,8 @@ server.registerTool(
           out.nextRun = runView(await launch(rec.repo, rerunFile, rec.attempt + 1, rec.id, rec.mainConfig));
         } else out.nextRun = runView(await launch(rec.repo, rec.mainConfig, rec.attempt + 1, rec.id));
       }
+      // custom YAML on a run that had proposed fixes = those fixes were overridden (a signal the rule may be wrong)
+      recordOutcome({ event: yamlContent ? "custom-yaml" : "auto-fix", runId, nextRunId: out.nextRun?.runId, ruleIds: [...new Set(yamlContent ? ruleIds.filter(() => rec.diagnosis?._fixes?.length) : ruleIds)], fixIds: fixIds || null, applied });
       return text(out);
     } catch (e) {
       return fail(e);
@@ -596,7 +628,7 @@ server.registerTool(
   "diagnose_hyperexecute_logs",
   {
     title: "Diagnose HyperExecute logs",
-    description: "Diagnose a HyperExecute failure from pasted log text or a downloaded log file/folder (e.g. from the dashboard or --download-logs) against the repo's YAML. Returns the diagnosis and, if fixable, the corrected YAML (write:true saves it).",
+    description: "Diagnose a HyperExecute failure from pasted logs or a downloaded log file/folder against the repo's YAML; returns the diagnosis and, when fixable, the corrected YAML (write:true saves it). USE when the job was run outside this server (dashboard, CI). For runs started with run_hyperexecute_job use get_hyperexecute_run instead. Unrecognized failures are saved (masked) for review_diagnosis_feedback.",
     inputSchema: { repoPath: z.string().optional(), logText: z.string().optional(), logPath: z.string().optional(), yamlPath: z.string().optional(), write: z.boolean().optional() },
   },
   async ({ repoPath, logText, logPath, yamlPath, write }) => {
@@ -614,6 +646,7 @@ server.registerTool(
       const profile = analyzeRepo(repo);
       const d = diagnose({ evidence: collectEvidence({ output: text_ }), yamlText, profile, exitCode: 1, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
       const out = { diagnosis: describeDiagnosis(d) };
+      if (recordUnmatched({ source: "pasted-logs", diagnosis: d, logText: text_, profile, yamlText })) out.savedForReview = "Unrecognized failure saved (masked) for rule review — see review_diagnosis_feedback.";
       if (d._fixes.length && yamlText) {
         const r = applyDiagnosisFixes(yamlText, d);
         let next = r.yaml;
@@ -623,6 +656,28 @@ server.registerTool(
         if (write) { fs.writeFileSync(file, next); out.written = file; }
       } else if (!d.diagnoses.length) out.logDigest = logDigest(text_);
       return text(out);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "review_diagnosis_feedback",
+  {
+    title: "Review unrecognized failures and fix outcomes",
+    description:
+      "Summarize what the diagnosis rules missed: failures saved (masked, locally) when a run or pasted log came back unknown/needs-attention or had unexplained tests, grouped by signature with counts, plus per-rule fix outcomes (applied, overridden with custom YAML, next attempt passed / failed the same way). USE for the weekly rule review: turn recurring groups into doctor.js rules, then markReviewed. Not for diagnosing a single run.",
+    inputSchema: {
+      sinceDays: z.number().int().min(1).max(365).optional().describe("Default 30"),
+      markReviewed: z.array(z.string()).optional().describe("Signatures to move to reviewed/ (after adding a rule for them)"),
+      includeReviewed: z.boolean().optional(),
+    },
+  },
+  async ({ sinceDays, markReviewed: sigs, includeReviewed }) => {
+    try {
+      const moved = sigs?.length ? markReviewed(sigs) : undefined;
+      return text({ ...reviewFeedback({ sinceDays, includeReviewed }), moved });
     } catch (e) {
       return fail(e);
     }
@@ -658,7 +713,7 @@ server.registerPrompt(
           text: `Create a HyperExecute YAML for the repo at ${repoPath || "the current workspace"}.
 ${requirements ? `Customer requirements: ${requirements}\n` : ""}
 Steps:
-1. Call analyze_repo and summarise the detected stack, tests, and warnings. Call scan_credentials_and_reporting and report hard-coded credentials and customer-side reporting (offer fix_hardcoded_credentials).
+1. Call analyze_repo and summarise the detected stack, tests, and warnings. If confidence isn't high, show the assumptions and ask the user its questions before going on. Call scan_credentials_and_reporting and report hard-coded credentials and customer-side reporting (offer fix_hardcoded_credentials).
 2. Call search_knowledge_base for the detected framework (and any special requirements such as tunnel, secrets, reports, mobile) — prefer Confluence guidance where it conflicts with the bundled notes.
 3. Read the key config files yourself (runner classes, driver/capability setup, config.properties / playwright.config / wdio.conf) to confirm how tests get their browser/grid and credentials.
 4. Call generate_hyperexecute_yaml with the right options (framework, runson, splitBy, concurrency).

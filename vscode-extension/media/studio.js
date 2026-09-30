@@ -17,7 +17,6 @@
     <header class="top">
       <div class="repo">
         <select id="repoSel" aria-label="Repository"></select>
-        <button class="icon-btn" id="browse" title="Choose another folder">📁</button>
         <button class="icon-btn" id="reanalyze" title="Re-analyze repo">↻</button>
       </div>
       <div class="pills">
@@ -26,11 +25,11 @@
       </div>
     </header>
     <nav class="main-tabs" role="tablist">
-      <button class="mtab" data-pane="chat">Chat</button>
-      <button class="mtab" data-pane="yaml">YAML <span class="n" id="yamlBadge"></span></button>
-      <button class="mtab" data-pane="grid">Grid</button>
-      <button class="mtab" data-pane="runs">Runs <span class="n" id="runsBadge"></span></button>
-      <button class="mtab" data-pane="setup">Setup <span class="n" id="setupBadge"></span></button>
+      <button class="mtab" role="tab" data-pane="chat">Chat</button>
+      <button class="mtab" role="tab" data-pane="yaml">YAML <span class="n" id="yamlBadge"></span></button>
+      <button class="mtab" role="tab" data-pane="grid">Grid</button>
+      <button class="mtab" role="tab" data-pane="runs">Runs <span class="n" id="runsBadge"></span></button>
+      <button class="mtab" role="tab" data-pane="setup">Setup <span class="n" id="setupBadge"></span></button>
     </nav>
     <section class="pane" data-pane="chat">
       <button class="stackline" id="stackline" title="Show detected stack and options"></button>
@@ -55,10 +54,10 @@
       </div>
       <div class="checks">
         <div class="tabs" role="tablist">
-          <button class="tab" data-tab="validation">Validation<span class="n" id="nVal"></span></button>
-          <button class="tab" data-tab="notes">Notes<span class="n" id="nNotes"></span></button>
-          <button class="tab" data-tab="discovery">Discovery</button>
-          <button class="tab" data-tab="optimize">Optimize<span class="n" id="nOpt"></span></button>
+          <button class="tab" role="tab" data-tab="validation">Validation<span class="n" id="nVal"></span></button>
+          <button class="tab" role="tab" data-tab="notes">Notes<span class="n" id="nNotes"></span></button>
+          <button class="tab" role="tab" data-tab="discovery">Discovery</button>
+          <button class="tab" role="tab" data-tab="optimize">Optimize<span class="n" id="nOpt"></span></button>
         </div>
         <div class="panel" id="checks"></div>
       </div>
@@ -89,6 +88,8 @@
           <div class="field"><label for="ltUser">Username</label><input type="text" id="ltUser" autocomplete="off" spellcheck="false"></div>
           <div class="field"><label for="ltKey">Access key</label><input type="password" id="ltKey" autocomplete="off"></div>
           <div class="row"><button class="btn primary" id="ltSave">Save &amp; test</button><button class="btn ghost" id="ltTest">Test</button><button class="btn ghost" id="ltClear">Remove</button></div>
+          <label class="toggle tight"><input type="checkbox" id="ltEmbed"> Put my username &amp; key into generated YAMLs</label>
+          <div class="small muted" id="ltEmbedNote"></div>
           <div class="small muted">Used by ▶ Run to trigger jobs. The key is kept in VS Code's encrypted secret storage.</div>
         </div></div>
       <div class="card"><div class="card-h">Credentials &amp; reporting<span class="spacer"></span><button class="icon-btn small" id="rescan">Rescan</button></div><div class="card-b" id="scan"></div></div>
@@ -102,7 +103,7 @@
   const showPane = (p) => {
     pane = p;
     document.querySelectorAll(".pane").forEach((el) => el.classList.toggle("active", el.dataset.pane === p));
-    document.querySelectorAll(".mtab").forEach((el) => el.classList.toggle("active", el.dataset.pane === p));
+    document.querySelectorAll(".mtab").forEach((el) => { el.classList.toggle("active", el.dataset.pane === p); el.setAttribute("aria-selected", el.dataset.pane === p); });
     if (p === "yaml") updateGutter();
   };
   document.querySelectorAll(".mtab").forEach((t) => (t.onclick = () => showPane(t.dataset.pane)));
@@ -110,7 +111,6 @@
 
   // ---------- events ----------
   $("#repoSel").onchange = (e) => send("selectRepo", { path: e.target.value });
-  $("#browse").onclick = () => send("browseRepo");
   $("#reanalyze").onclick = () => send("reanalyze");
   $("#backendPill").onclick = () => send("command", { id: "hyperexecute.chooseBackend" });
   $("#kbPill").onclick = () => send("command", { id: "hyperexecute.setAtlassianToken" });
@@ -169,7 +169,7 @@
 
   function renderTop() {
     const sel = $("#repoSel");
-    sel.innerHTML = S.repos.length ? S.repos.map((r) => `<option value="${esc(r.path)}" ${r.path === S.repo ? "selected" : ""}>${esc(r.name)}</option>`).join("") : `<option>Open a folder or click 📁</option>`;
+    sel.innerHTML = S.repos.length ? S.repos.map((r) => `<option value="${esc(r.path)}" ${r.path === S.repo ? "selected" : ""}>${esc(r.name)}</option>`).join("") : `<option>Open a folder in VS Code to begin</option>`;
     const m = S.meta || {};
     const bp = $("#backendPill");
     bp.children[0].className = "dot " + (m.backendId === "rules" ? "off" : "on");
@@ -185,14 +185,14 @@
     if (!p) { el.innerHTML = `<span class="muted">Open a folder with test code to begin</span>`; return; }
     const t = p.tests;
     const count = t.scenarioCount ? `${t.scenarioCount} scenarios` : t.methodCount ? `${t.methodCount} tests` : t.fileCount ? `${t.fileCount} spec files` : t.classCount ? `${t.classCount} classes` : "no tests found";
-    el.innerHTML = `<span class="tag">${esc(r.framework || p.language || "?")}</span><span>${esc([p.language, p.buildTool || p.packageManager].filter(Boolean).join(" · "))} · ${count}${r.yamlVersion ? " · YAML v" + r.yamlVersion : ""}</span>${S.scan?.credentials?.length ? `<span class="warn-n bad" title="Hard-coded credentials">🔑 ${S.scan.credentials.length}</span>` : ""}${p.warnings?.length ? `<span class="warn-n">⚠ ${p.warnings.length}</span>` : ""}<span class="chev">›</span>`;
+    el.innerHTML = `<span class="tag">${esc(r.framework || p.language || "?")}</span><span>${esc([p.language, p.buildTool || p.packageManager].filter(Boolean).join(" · "))} · ${count}${r.yamlVersion ? " · YAML v" + r.yamlVersion : ""}</span>${S.scan?.credentials?.length ? `<span class="warn-n bad" title="Hard-coded credentials">🔑 ${S.scan.credentials.length}</span>` : ""}${p.warnings?.length ? `<span class="warn-n">⚠ ${p.warnings.length}</span>` : ""}${p.confidence && p.confidence.level !== "high" ? `<span class="conf ${esc(p.confidence.level)}" title="${esc((p.confidence.reasons || []).join("; "))}">${p.questions?.length ? `${p.questions.length} to confirm` : `${esc(p.confidence.level)} confidence`}</span>` : ""}<span class="chev">›</span>`;
   }
 
   function renderStack() {
     renderStackLine();
     const el = $("#stack");
     const p = S.profile;
-    if (!p) { el.innerHTML = `<div class="muted small">Open a workspace folder with test automation code, or pick one with 📁.</div>`; return; }
+    if (!p) { el.innerHTML = `<div class="muted small">Open a workspace folder with test automation code.</div>`; return; }
     const r = S.result || {};
     const t = p.tests;
     const stats = [
@@ -210,8 +210,24 @@
       </div>
       <div class="stats">${stats.map(([k, n]) => `<div class="stat"><b>${n}</b><span>${k}</span></div>`).join("") || `<span class="muted small">No tests detected</span>`}</div>
       ${t.tags?.length ? `<div class="small muted" style="margin-top:8px">Tags: ${t.tags.slice(0, 8).map(esc).join(", ")}</div>` : ""}
-      ${w.length ? `<details class="warn"><summary>⚠ ${w.length} thing${w.length > 1 ? "s" : ""} to check</summary><ul>${w.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}`;
+      ${w.length ? `<details class="warn"><summary>⚠ ${w.length} thing${w.length > 1 ? "s" : ""} to check</summary><ul>${w.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
+      ${confidenceBlock(p)}`;
+    el.querySelectorAll("button.answer").forEach((b) => (b.onclick = () => { showPane("chat"); input.value = b.dataset.q + "\n→ "; autosize(); input.focus(); }));
     $("#fileState").textContent = S.existingFile ? `${S.existingFile} exists in repo` : "";
+  }
+
+  // What the analysis is unsure about: confidence, what it assumed, and what to ask before generating.
+  function confidenceBlock(p) {
+    const c = p.confidence;
+    if (!c) return "";
+    const a = p.assumptions || [];
+    const q = p.questions || [];
+    if (c.level === "high" && !a.length && !q.length) return `<div class="conf-box high"><span class="conf high">high confidence</span></div>`;
+    return `<div class="conf-box ${esc(c.level)}">
+      <div class="conf-h"><span class="conf ${esc(c.level)}">${esc(c.level)} confidence</span>${c.reasons?.length ? `<span class="small muted">${esc(c.reasons.join("; "))}</span>` : ""}</div>
+      ${q.length ? `<div class="conf-sub">Confirm with the customer</div><ul class="qs">${q.map((x) => `<li><span>${esc(x)}</span><button class="btn ghost small answer" data-q="${esc(x)}" title="Answer in chat">Answer</button></li>`).join("")}</ul>` : ""}
+      ${a.length ? `<div class="conf-sub">Assumed</div><ul class="as">${a.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+    </div>`;
   }
 
   function renderOptions() {
@@ -231,6 +247,7 @@
       num("o-conc", "Concurrency (VMs)", o.concurrency ?? 5, 1, 500) +
       num("o-retry", "Retries", retries, 0, 5) +
       num("o-timeout", "Timeout (min)", o.globalTimeout ?? 90, 1, 150) +
+      (S.profile?.mavenProfiles?.length ? sel("o-mvnp", "Maven profile", [["", "None (default)"], ...S.profile.mavenProfiles.map((m) => [m.id, m.id + (m.activeByDefault ? " (active by default)" : "")])], o.mavenProfile || "") : "") +
       `<label class="toggle"><input type="checkbox" id="o-tunnel" ${o.tunnel ? "checked" : ""}> Tunnel</label>`;
     const push = (options) => send("setOptions", { options });
     $("#o-ver").onchange = (e) => push({ yamlVersion: e.target.value === "auto" ? null : e.target.value });
@@ -238,6 +255,7 @@
     $("#o-mode").onchange = (e) => push({ executionMode: e.target.value, yamlVersion: e.target.value === "matrix" ? "0.1" : o.yamlVersion });
     $("#o-split").onchange = (e) => push({ splitBy: e.target.value });
     $("#o-tunnel").onchange = (e) => push({ tunnel: e.target.checked || null });
+    if ($("#o-mvnp")) $("#o-mvnp").onchange = (e) => push({ mavenProfile: e.target.value || null });
     const debounced = (fn) => { let t; return (e) => { clearTimeout(t); t = setTimeout(() => fn(e), 500); }; };
     $("#o-conc").oninput = debounced((e) => +e.target.value >= 1 && push({ concurrency: +e.target.value }));
     $("#o-retry").oninput = debounced((e) => { const n = +e.target.value; push(n > 0 ? { retryOnFailure: true, maxRetries: Math.min(5, n) } : { retryOnFailure: false, maxRetries: null }); });
@@ -298,7 +316,7 @@
   }
 
   function renderChecks() {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === activeTab));
+    document.querySelectorAll(".tab").forEach((t) => { t.classList.toggle("active", t.dataset.tab === activeTab); t.setAttribute("aria-selected", t.dataset.tab === activeTab); });
     const v = S?.validation;
     const notes = [...(S?.result?.notes || [])];
     $("#nVal").textContent = v ? (v.errors.length ? `(${v.errors.length}✕)` : v.warnings.length ? `(${v.warnings.length}!)` : "✓") : "";
@@ -321,11 +339,11 @@
       renderOptimize(el);
     } else {
       const d = dryRun;
-      if (!d) el.innerHTML = `<div class="muted small">Click “Dry-run discovery” to run the discovery command locally and preview the tasks HyperExecute will create.</div>`;
+      if (!d) el.innerHTML = `<div class="muted small">Click “Dry-run” to run the discovery command locally and preview the tasks HyperExecute will create.</div>`;
       else if (d.matrix) el.innerHTML = row("info", "i", `Matrix mode: ${d.tasks} task(s) from keys ${d.matrixKeys.join(", ")}.`);
       else
         el.innerHTML =
-          row(d.count ? "ok" : "err", d.count ? "✓" : "✕", `${d.count} test unit(s) discovered${d.exit ? ` (exit ${d.exit})` : ""}`) +
+          row(d.count ? "ok" : "err", d.count ? "✓" : "✕", `${d.count} test unit(s) discovered${d.exit ? ` (exit ${d.exit})` : ""}${d.count ? " — saved; the next run is checked against this count" : ""}`) +
           `<pre class="cmd">${esc(d.command)}</pre>` +
           (d.items.length ? `<ol class="disc-list">${d.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ol>` : "") +
           (d.sample.length ? `<div class="small muted">First task runs:</div>${d.sample.map((s) => `<pre class="cmd">${esc(s)}</pre>`).join("")}` : "") +
@@ -361,10 +379,15 @@
   };
   $("#ltTest").onclick = () => { $("#ltState").textContent = "Checking…"; send("ltAccountTest"); };
   $("#ltClear").onclick = () => { $("#ltUser").value = ""; $("#ltKey").value = ""; send("ltAccountClear"); };
+  $("#ltEmbed").onchange = (e) => send("setEmbedCreds", { on: e.target.checked });
   function renderAccount() {
     const m = S.meta || {};
     if (document.activeElement !== $("#ltUser") && !$("#ltUser").value) $("#ltUser").value = m.ltUser || "";
     $("#ltKey").placeholder = m.ltReady ? "saved — type to replace" : "paste your access key";
+    $("#ltEmbed").checked = m.embedCreds !== false;
+    $("#ltEmbedNote").textContent = m.embedCreds === false
+      ? "YAMLs use ${{ .secrets.LT_USERNAME }} references (safe to commit); ▶ Run fills them in."
+      : m.ltReady ? "New YAMLs contain your account, so you don't edit them. Don't commit them to a shared repo or send them to a customer." : "Once saved, new YAMLs contain your account automatically.";
     if (!$("#ltState").dataset.set) {
       $("#ltState").textContent = m.ltReady ? "✓ saved" : "not set";
       $("#ltState").className = "small " + (m.ltReady ? "ok" : "warn");
@@ -499,8 +522,9 @@
     $("#runStart").disabled = running;
     $("#runStop").disabled = !running;
     const badge = $("#runsBadge");
-    badge.textContent = !r ? "" : running ? "●" : r.status === "passed" ? "✓" : ["fixable", "unknown", "test-failures", "auth-error", "needs-attention"].includes(r.status) ? "✕" : "";
-    badge.className = "n " + (!r ? "" : running ? "run" : r.status === "passed" ? "good" : "bad");
+    const [bcls] = r ? STATUS[r.status] || ["muted"] : [""];
+    badge.textContent = !r ? "" : running ? "●" : bcls === "good" ? "✓" : bcls === "bad" ? "✕" : bcls === "warn" ? "!" : "";
+    badge.className = "n " + (running ? "run" : bcls);
     if (!r) {
       $("#runStatus").innerHTML = `<div class="muted small">Runs the job with your account, streams the log here, and diagnoses failures. With <b>Auto-fix &amp; rerun</b>, YAML problems are fixed and the job rerun automatically; test failures are never "fixed" by rerunning.</div>`;
       $("#runDiag").innerHTML = "";
@@ -509,7 +533,7 @@
     if (!runLog.textContent && r.tail) runLog.textContent = r.tail;
     const [cls, label] = STATUS[r.status] || ["muted", r.status];
     const elapsed = () => Math.round(((running ? Date.now() : r.startedAt + (r.history.at(-1)?.durationSec || 0) * 1000) - r.startedAt) / 1000);
-    $("#runStatus").innerHTML = `<div class="run-line"><span class="pill ${cls}">${esc(label)}</span><span class="small muted">Attempt ${r.attempt}/${r.maxAttempts}${r.auto ? " · auto-fix on" : ""} · <span id="runElapsed">${fmtDur(elapsed())}</span></span>${r.jobUrl ? `<a class="small" id="jobLink">Open job ↗</a>` : ""}</div>`;
+    $("#runStatus").innerHTML = `<div class="run-line"><span class="status ${cls}">${esc(label)}</span><span class="small muted">Attempt ${r.attempt}/${r.maxAttempts}${r.auto ? " · auto-fix on" : ""} · <span id="runElapsed">${fmtDur(elapsed())}</span></span>${r.jobUrl ? `<a class="small" id="jobLink">Open job ↗</a>` : ""}</div>`;
     if (r.jobUrl) $("#jobLink").onclick = () => send("openLink", { url: r.jobUrl });
     clearInterval(runTimer);
     if (running) runTimer = setInterval(() => { const el = $("#runElapsed"); if (el) el.textContent = fmtDur(elapsed()); }, 1000);
@@ -523,8 +547,15 @@
       const pill = { code: "bad", yaml: "warn", unknown: "muted" };
       const causeLabel = { code: "Code", yaml: "YAML", unknown: "?" };
       html += `<div class="small"><b>${t.failed} failed</b> of ${t.total}: ${t.code} code (left alone) · ${t.yaml} YAML/environment${t.unknown ? ` · ${t.unknown} unrecognized` : ""}</div>`;
-      html += `<ul class="findings tests">${t.list.map((x) => `<li><span class="pill ${pill[x.cause]}">${causeLabel[x.cause]}</span> <b>${esc(x.label)}</b><div class="small muted">${esc(x.reason)}</div>${x.fix ? `<div class="small ok">→ ${esc(x.fix)}</div>` : ""}${x.needsValue ? `<div class="field"><label for="val-${esc(x.needsValue)}">Value for ${esc(x.needsValue)}</label><input type="text" class="needs-value" id="val-${esc(x.needsValue)}" data-name="${esc(x.needsValue)}" placeholder="e.g. https://…"></div>` : ""}${x.note ? `<div class="small">${esc(x.note)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Error</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`;
+      html += `<ul class="findings tests">${t.list.map((x) => `<li><span class="status ${pill[x.cause]}">${causeLabel[x.cause]}</span> <b>${esc(x.label)}</b><div class="small muted">${esc(x.reason)}</div>${x.fix ? `<div class="small ok">→ ${esc(x.fix)}</div>` : ""}${x.needsValue ? `<div class="field"><label for="val-${esc(x.needsValue)}">Value for ${esc(x.needsValue)}</label><input type="text" class="needs-value" id="val-${esc(x.needsValue)}" data-name="${esc(x.needsValue)}" placeholder="e.g. https://…"></div>` : ""}${x.note ? `<div class="small">${esc(x.note)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Error</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`;
     }
+    const dc = r.discoveryCheck;
+    if (dc && !running && dc.verdict !== "n/a") {
+      const good = dc.verdict === "ok";
+      const nums = [dc.expectedItems != null ? `expected ${dc.expectedItems} (${esc(dc.expectedItemsFrom)})` : "", dc.platformDiscovered != null ? `HyperExecute discovered ${dc.platformDiscovered}` : "", dc.executedTests != null ? `${dc.executedTests} test case(s) in reports` : ""].filter(Boolean).join(" · ");
+      html += `<div class="disc-check ${good ? "good" : dc.verdict === "unconfirmed" ? "muted" : "bad"}"><b>${good ? "✓ Test count looks right" : dc.verdict === "zero-tests" ? "✕ 0 tests ran" : dc.verdict === "unconfirmed" ? "Test count not confirmed" : "! Test count differs"}</b>${nums ? `<div class="small">${nums}</div>` : ""}${dc.message ? `<div class="small muted">${esc(dc.message)}</div>` : ""}</div>`;
+    }
+    if (r.savedForReview && !running) html += `<div class="small muted">The unrecognized part of this failure was saved (masked, on this machine) for rule review — <code>npm run feedback</code>.</div>`;
     if (d && !running) {
       html += d.diagnoses.length
         ? `<ul class="findings">${d.diagnoses.map((x) => `<li><b>${esc(x.title)}</b><div class="small muted">${esc(x.why)}</div>${x.fixSummary ? `<div class="small ok">→ Fix: ${esc(x.fixSummary)}</div>` : ""}${x.advice ? `<div class="small">${esc(x.advice)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Evidence</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`

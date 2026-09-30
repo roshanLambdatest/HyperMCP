@@ -1,0 +1,48 @@
+# Playwright with a non-default config path (from the npm script) and 3 projects.
+#
+# Pitfalls:
+# - Playwright only reads playwright.config.* by default: pass --config.
+# - Every task runs all projects; use extraMatrix {project: [...]} to spread them over VMs.
+# - Keep workers at 1-2 on HyperExecute; parallelism comes from concurrency.
+#
+# Built by the MCP generator from test/fixtures/playwright-projects; replace with a YAML verified on HyperExecute when you have one.
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+runtime:
+  language: node
+  version: "20"
+env:
+  TEST_ENV: staging
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  BASE_URL: <set BASE_URL>
+cacheKey: '{{ checksum "package.json" }}'
+cacheDirectories:
+  - node_modules
+pre:
+  - npm install
+  - npx playwright install --with-deps
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: find e2e/specs -type f \( -name '*.spec.*' -o -name '*.test.*' \) -not -path '*/node_modules/*' | sed 's#^\./##'
+testRunnerCommand: npx playwright test --config=e2e/pw.config.ts "$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: PlaywrightReport
+    path:
+      - playwright-report/**
+      - test-results/**
+jobLabel:
+  - playwright
+  - linux
+  - autosplit

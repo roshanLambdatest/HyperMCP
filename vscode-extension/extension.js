@@ -10,8 +10,11 @@ const ai = require("./ai");
 let core;
 async function loadCore() {
   if (!core) {
+    // Protected builds ship one bundled core.mjs; development uses the synced core/ files.
+    const bundled = path.join(__dirname, "core.mjs");
+    if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -145,7 +148,7 @@ function registerMcpServer(context) {
           CONFLUENCE_SPACE: cfg.get("confluenceSpace") || "",
         };
         if (email && token) Object.assign(env, { ATLASSIAN_EMAIL: email, ATLASSIAN_API_TOKEN: token });
-        return [new vscode.McpStdioServerDefinition("HyperExecute YAML", process.execPath, [path.join(__dirname, "core", "index.js")], env, "1.0.0")];
+        return [new vscode.McpStdioServerDefinition("HyperExecute YAML", process.execPath, [fs.existsSync(path.join(__dirname, "mcp.mjs")) ? path.join(__dirname, "mcp.mjs") : path.join(__dirname, "core", "index.js")], env, "1.0.0")];
       },
     }),
     context.secrets.onDidChange(() => emitter.fire()),
@@ -246,7 +249,9 @@ class Studio {
     const b = await ai.detectBackend(this.context);
     const { email, token } = await applyAtlassianEnv(this.context);
     const acct = await this.ltAccount();
-    this.state.meta = { ltUser: acct.username || null, ltReady: !!(acct.username && acct.accessKey), backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
+    this.ltCreds = acct.username && acct.accessKey ? acct : null;
+    const embedCreds = this.context.globalState.get("hyperexecute.embedCredentials") !== false;
+    this.state.meta = { ltUser: acct.username || null, ltReady: !!(acct.username && acct.accessKey), embedCreds, backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
     this.push();
   }
 
@@ -354,8 +359,8 @@ class Studio {
         await this.context.globalState.update("hyperexecute.ltUsername", username);
         await this.context.secrets.store("hyperexecute.ltAccessKey", accessKey);
         c.saveCreds({ username, accessKey }); // shared with the MCP server (Claude Code / Copilot)
-        this.post({ type: "ltStatus", ok: true, text: t.text + " — saved for the Studio and the MCP tools" });
-        await this.refreshMeta();
+        this.post({ type: "ltStatus", ok: true, text: t.text + " — saved for the Studio, the MCP tools and new YAMLs" });
+        await this.credsChanged();
         break;
       }
       case "ltAccountTest": {
@@ -369,7 +374,11 @@ class Studio {
         await this.context.secrets.delete("hyperexecute.ltAccessKey");
         c.clearCreds();
         this.post({ type: "ltStatus", ok: false, text: "Removed" });
-        await this.refreshMeta();
+        await this.credsChanged();
+        break;
+      case "setEmbedCreds":
+        await this.context.globalState.update("hyperexecute.embedCredentials", !!m.on);
+        await this.credsChanged();
         break;
       case "rescan":
         this.state.scan = c.scanRepo(this.state.repo);
@@ -435,10 +444,25 @@ class Studio {
     return vscode.workspace.getConfiguration("hyperexecute").get("outputFileName") || "hyperexecute.yaml";
   }
 
+  // Generator options plus the saved LambdaTest account, so new YAMLs carry it (unless turned off in Setup).
+  genOptions(extra = {}) {
+    const embed = this.state.meta?.embedCreds !== false;
+    return { ...this.state.options, ...extra, embedCredentials: embed, ltCredentials: embed && this.ltCreds ? { username: this.ltCreds.username, accessKey: this.ltCreds.accessKey } : undefined };
+  }
+
+  // After the account or the toggle changes: rebuild the YAML unless the user has hand edits in it.
+  async credsChanged() {
+    await this.refreshMeta();
+    if (!this.state.profileFull) return;
+    if (this.state.dirty) return this.toast("Your hand edits are kept — the account goes into the YAML the next time it is regenerated.");
+    this.regenerate();
+    this.push();
+  }
+
   regenerate() {
     const c = core;
     try {
-      const r = c.generateYaml(this.state.profileFull, { ...this.state.options, outputFileName: this.outputName() });
+      const r = c.generateYaml(this.state.profileFull, this.genOptions({ outputFileName: this.outputName() }));
       this.state.result = { yamlVersion: r.yamlVersion, framework: r.framework, splitBy: r.splitBy, executionMode: r.executionMode, supportedSplits: r.supportedSplits, notes: r.notes, warnings: r.warnings };
       this.state.yaml = r.yaml;
       this.state.dirty = false;
@@ -540,7 +564,7 @@ class Studio {
     if (this.state.result?.yamlVersion === "0.2" || /^version:\s*["']?0\.2/m.test(this.state.yaml)) {
       return this.toast("v0.2 discovery runs on HyperExecute — check the discovery task log on the first run.");
     }
-    const YAML = (await import(pathToFileURL(require.resolve("yaml")).href)).default;
+    const YAML = (await loadCore()).YAML || (await import(pathToFileURL(require.resolve("yaml")).href)).default;
     let doc;
     try {
       doc = YAML.parse(this.state.yaml);
@@ -557,6 +581,8 @@ class Studio {
       this.busy();
       const items = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       this.state.discoveredUnits = items.length || null;
+      // remembered so the real run can be compared with it (discovery check)
+      if (!err) core?.saveDryRun?.(this.state.repo, this.outputName(), { command: cmd, discovered: items.length, items });
       this.post({
         type: "dryRun",
         result: { command: cmd, count: items.length, items: items.slice(0, 200), stderr: stderr?.slice(0, 1000), exit: err ? err.code ?? 1 : 0, sample: doc.testRunnerCommand ? items.slice(0, 2).map((t) => doc.testRunnerCommand.replace(/\$test/g, t)) : [] },
@@ -784,8 +810,16 @@ class Studio {
     this.lastDiagnosis = d;
     this.lastEvidence = evidence;
     run.status = r.stopped ? "stopped" : d.status;
+    run.discoveryCheck = c.checkDiscovery({ repo: this.state.repo, yamlPath: this.outputName(), yamlText, profile: this.state.profileFull, output: r.output, tests: evidence.tests, targeted: !!run.targeted });
+    // a green job that ran 0 tests is not a pass
+    if (run.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(run.status)) run.status = "needs-attention";
     run.jobUrl = run.jobUrl || d.jobUrl;
     run.diagnosis = c.describeDiagnosis(d);
+    if (!r.stopped) {
+      const { accessKey } = await this.ltAccount();
+      run.savedForReview = !!c.recordUnmatched({ source: "studio-run", diagnosis: { ...d, status: run.status }, logText: evidence.text, profile: this.state.profileFull, yamlText, secrets: [accessKey] });
+      c.recordOutcome({ event: "result", runId: `studio-${run.startedAt}-${run.attempt}`, attempt: run.attempt, status: run.status, ruleIds: d.diagnoses.map((x) => x.id), discovery: run.discoveryCheck.verdict, framework: this.state.profileFull.primaryFramework });
+    }
     run.logFiles = evidence.files;
     const entry = { attempt: run.attempt, targeted: !!run.targeted, tests: d.tests, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [] };
     run.history.push(entry);
@@ -834,7 +868,7 @@ class Studio {
         fixedYaml: this.state.yaml,
         selectors: sels,
         profile: this.state.profileFull,
-        generate: (o) => c.generateYaml(this.state.profileFull, { ...this.state.options, ...o }).yaml,
+        generate: (o) => c.generateYaml(this.state.profileFull, this.genOptions(o)).yaml,
       });
       if (rerunYaml) {
         fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), rerunYaml);
@@ -905,7 +939,7 @@ class Studio {
     const d = this.lastDiagnosis;
     const sels = d.tests.list.map((t) => t.selector).filter(Boolean);
     if (!sels.length || !core) return undefined;
-    const y = core.buildTargetedRerun({ fixedYaml: this.state.yaml, selectors: sels, profile: this.state.profileFull, generate: (o) => core.generateYaml(this.state.profileFull, { ...this.state.options, ...o }).yaml });
+    const y = core.buildTargetedRerun({ fixedYaml: this.state.yaml, selectors: sels, profile: this.state.profileFull, generate: (o) => core.generateYaml(this.state.profileFull, this.genOptions(o)).yaml });
     if (!y) return undefined;
     fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), y);
     return ".hyperexecute-rerun.yaml";

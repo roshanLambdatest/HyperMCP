@@ -1,0 +1,1 @@
+{ "name": "cy9", "devDependencies": { "cypress": "^9.7.0" } }

@@ -1,0 +1,44 @@
+# .NET NUnit with several .csproj files, YAML v0.2 method split.
+#
+# Pitfalls:
+# - With several .csproj files pin the test project with --project, or the runner refuses.
+# - v0.2 .NET runners need net5.0+.
+#
+# Built by the MCP generator from test/fixtures/dotnet-nunit; replace with a YAML verified on HyperExecute when you have one.
+version: "0.2"
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 5
+idleTimeout: 900
+runtime:
+  language: dotnet
+  version: "8.0"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+pre:
+  - dotnet restore Demo.sln
+  - dotnet build Demo.sln -c Release --no-restore
+post:
+  - ls -la
+framework:
+  name: dotnet/nunit
+  discoveryMode: remote
+  discoveryType: method
+  flags:
+    - --project
+    - Tests/Tests.csproj
+mergeArtifacts: true
+uploadArtefacts:
+  - name: TestResults
+    path:
+      - TestResults/**
+jobLabel:
+  - nunit
+  - linux
+  - v0.2

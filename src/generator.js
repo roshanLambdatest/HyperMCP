@@ -3,6 +3,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { loadCreds } from "./credentials.js";
+
+// The saved LambdaTest account goes straight into the YAML unless turned off
+// (option embedCredentials: false, or HE_EMBED_CREDENTIALS=off); then ${{ .secrets.* }} references are used.
+export function embeddedCredentials(opts = {}) {
+  if (opts.embedCredentials === false || /^(off|0|false|no)$/i.test(process.env.HE_EMBED_CREDENTIALS || "")) return null;
+  const c = opts.ltCredentials || loadCreds();
+  return c?.username && c?.accessKey ? c : null;
+}
 
 const SECRET_LIKE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|USERNAME|USER_NAME|CREDENTIAL|AUTH)/i;
 
@@ -45,8 +54,8 @@ const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
 function javaTestRoots(profile) {
   const roots = new Set();
   for (const c of profile.tests.classes) {
-    const i = c.file.indexOf("src/test/java/");
-    if (i >= 0) roots.add(c.file.slice(0, i + "src/test/java".length));
+    const m = c.file.match(/^(.*?src\/test\/(?:java|groovy))\//);
+    if (m) roots.add(m[1]);
     else roots.add(path.posix.dirname(c.file));
   }
   return roots.size ? [...roots] : ["src/test/java"];
@@ -93,8 +102,10 @@ function javaRecipeInner(profile, fw, opts) {
     r.env.CACHE_DIR = "m2_cache_dir";
     r.cacheKey = `{{ checksum "${inRoot("pom.xml")}" }}`;
     r.cacheDirectories = ["$CACHE_DIR"];
-    r.pre = [`${mvn} -Dmaven.repo.local=$CACHE_DIR -Dmaven.test.skip=true clean install`];
-    r.base = `${mvn} test -Dmaven.repo.local=$CACHE_DIR -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false`;
+    const P = opts.mavenProfile ? ` -P${opts.mavenProfile}` : "";
+    r.pre = [`${mvn}${P} -Dmaven.repo.local=$CACHE_DIR -Dmaven.test.skip=true clean install`];
+    r.base = `${mvn} test${P} -Dmaven.repo.local=$CACHE_DIR -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false`;
+    if (opts.mavenProfile) notes.push(`Maven profile ${opts.mavenProfile} is passed to every mvn command (-P${opts.mavenProfile}).`);
   } else {
     const gradle = profile.hasGradleWrapper ? (win ? "gradlew.bat" : "./gradlew") : "gradle";
     const bf = inRoot(profile.primaryBuildFile || "build.gradle");
@@ -117,6 +128,7 @@ function javaRecipeInner(profile, fw, opts) {
     const sel = maven ? (runnerClass ? ` -Dtest=${runnerClass}` : "") : runnerClass ? ` --tests "*${runnerClass}"` : "";
     r.discovery.feature = `find ${featRoot} -type f -name '*.feature' | sed 's#^\\./##'`;
     r.discovery.scenario = `grep -rnE '^[[:space:]]*Scenario( Outline| Template)?:' ${featRoot} --include='*.feature' | awk -F: '{print $1":"$2}'`;
+    r.discovery.tag = `grep -rhoE '(^|[[:space:]])@[A-Za-z0-9_-]+' ${featRoot} --include='*.feature' | sed -E 's/^[[:space:]]*//' | sort -u`;
     r.runner = () => `${r.base}${sel} ${featProp('"$test"')}`;
     r.tagRunner = `${r.base}${sel} ${tagProp('"$tag"')}`;
     r.matrixValues.feature = profile.tests.features;
@@ -131,8 +143,10 @@ function javaRecipeInner(profile, fw, opts) {
   }
 
   // TestNG / JUnit
-  const sedFqn = `sed -E 's#^.*src/test/java/##; s#\\.java$##; s#/#.#g'`;
-  r.discovery.class = `grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' ${rootsArg} | ${sedFqn}`;
+  const sedFqn = `sed -E 's#^.*src/test/(java|groovy)/##; s#\\.(java|groovy)$##; s#/#.#g'`;
+  r.discovery.class = fw === "spock"
+    ? `grep -rlE --include='*.groovy' 'extends[[:space:]]+(spock\\.lang\\.)?Specification' ${rootsArg} | ${sedFqn}`
+    : `grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' ${rootsArg} | ${sedFqn}`;
   const sep = maven ? "#" : ".";
   r.discovery.method =
     `grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' ${rootsArg} | while read f; do ` +
@@ -142,6 +156,18 @@ function javaRecipeInner(profile, fw, opts) {
   r.matrixValues.method = profile.tests.classes.flatMap((c) => c.methods.map((m) => `${c.className}${sep}${m}`));
   r.matrixValues.tag = [...new Set(profile.tests.classes.flatMap((c) => [...(c.groups || []), ...(c.tags || [])]))];
   r.runner = () => (maven ? `${r.base} -Dtest="$test"` : `${r.base} --tests "$test"`);
+  // Gradle multi-module: "gradle test --tests X" fails in every module where X doesn't exist
+  // ("No tests found for given includes"), so each discovered item names its module's test task.
+  const modRoots = roots.filter((x) => x !== "src/test/java" && x.endsWith("/src/test/java"));
+  if (!maven && modRoots.length) {
+    const gradle = r.base.split(" ")[0];
+    const toTask = `sed -E 's#^(.*)/src/test/java/(.*)\\.java$#\\1 \\2#' | awk '{m=$1; gsub("/",":",m); c=$2; gsub("/",".",c); print m":test --tests "c}'`;
+    r.discovery.class = `grep -rlE --include='*.java' '@(Test|ParameterizedTest)([^A-Za-z]|$)' ${rootsArg} | ${toTask}`;
+    delete r.discovery.method;
+    r.runner = () => `${gradle} :$test --no-daemon`;
+    r.matrixValues.class = profile.tests.classes.map((c) => { const m = c.file.slice(0, c.file.indexOf("/src/test/java/")); return `${m.replace(/\//g, ":")}:test --tests ${c.className}`; });
+    notes.push(`Gradle multi-module build: each task runs one module's test task (e.g. :${modRoots[0].replace("/src/test/java", "").replace(/\//g, ":")}:test --tests <class>), because a --tests filter fails in modules that don't have the class. $test is left unquoted on purpose so it expands to task + filter.`);
+  }
   r.tagRunner = maven ? `${r.base} -Dgroups="$tag"` : `${r.base} -Dgroups="$tag"`;
   if (!maven) notes.push("Gradle has no built-in CLI flag for TestNG groups / JUnit tags; tag splitting assumes your build.gradle reads -Dgroups (useTestNG { includeGroups System.getProperty('groups') }).");
 
@@ -172,14 +198,20 @@ function nodeRecipe(profile, fw, opts) {
   const notes = [];
   const r = { env: {}, notes, discovery: {}, matrixValues: {}, uploadArtefacts: [] };
   const cd = profile.packageRoot ? `cd ${profile.packageRoot} && ` : "";
+  const installRoot = profile.installRoot ?? profile.packageRoot;
+  const icd = installRoot ? `cd ${installRoot} && ` : "";
   const pm = profile.packageManager;
   const install =
     pm === "yarn" ? "yarn install --frozen-lockfile" :
     pm === "pnpm" ? "npm install -g pnpm && pnpm install --frozen-lockfile" :
     profile.lockFile ? "npm ci" : "npm install";
-  r.pre = [`${cd}${install}`];
-  r.cacheKey = `{{ checksum "${path.posix.join(profile.packageRoot || "", profile.lockFile || "package.json")}" }}`;
-  r.cacheDirectories = [path.posix.join(profile.packageRoot || "", "node_modules")];
+  r.pre = [`${icd}${install}`];
+  r.cacheKey = `{{ checksum "${profile.lockFile || path.posix.join(installRoot || "", "package.json")}" }}`;
+  r.cacheDirectories = [path.posix.join(installRoot || "", "node_modules")];
+  if (profile.monorepo) notes.push(`Workspace monorepo: dependencies install at the repo root; tests run from ${profile.packageRoot || "the root"}/.`);
+  // Env vars the package's test script sets inline (cross-env FOO=bar …)
+  const script = (profile.testScripts || []).find((t) => Object.keys(t.env).length);
+  if (script) Object.assign(r.env, script.env);
   r.runtime = { language: "node", version: String(profile.runtimeVersion || "20") };
   const specFind = (dir, pattern) => `find ${dir || "."} -type f ${pattern} -not -path '*/node_modules/*' | sed 's#^\\./##'`;
   const specPat = `\\( -name '*.spec.*' -o -name '*.test.*' \\)`;
@@ -188,17 +220,30 @@ function nodeRecipe(profile, fw, opts) {
 
   switch (fw) {
     case "playwright":
-      r.pre.push(`${cd}npx playwright install`);
-      r.discovery.file = `${cd}${specFind(profile.testDir, specPat)}`;
-      r.runner = () => `${cd}npx playwright test "$test"`;
-      r.tagRunner = `${cd}npx playwright test --grep "$tag"`;
+      {
+        const isDefaultCfg = !profile.configFile || /^playwright\.config\.[mc]?[jt]s$/.test(profile.configFile);
+        const cfgArg = isDefaultCfg ? "" : ` --config=${profile.configFile}`;
+        const proj = opts.extraMatrix?.project ? ' --project="$project"' : "";
+        r.pre.push(`${cd}npx playwright install --with-deps`);
+        r.discovery.file = `${cd}${specFind(profile.testDir, specPat)}`;
+        r.runner = () => `${cd}npx playwright test${cfgArg}${proj} "$test"`;
+        r.tagRunner = `${cd}npx playwright test${cfgArg}${proj} --grep "$tag"`;
+        if (cfgArg) notes.push(`Using ${profile.configFile} (from the package's test script) — Playwright only reads playwright.config.* by default.`);
+        if ((profile.playwrightProjects || []).length > 1 && !proj) notes.push(`playwright config has ${profile.playwrightProjects.length} projects (${profile.playwrightProjects.join(", ")}); every task runs all of them. To spread them over VMs pass extraMatrix {"project": [${profile.playwrightProjects.map((x) => `"${x}"`).join(", ")}]}.`);
+        if (profile.playwrightWorkers > 2) notes.push(`The config sets workers: ${profile.playwrightWorkers}; add --workers=1 (or 2) to the runner on HyperExecute — parallelism comes from concurrency.`);
+      }
       r.matrixValues.tag = grepTags(profile, /@[\w-]+/g);
       r.uploadArtefacts.push({ name: "PlaywrightReport", path: ["playwright-report/**", "test-results/**"] });
-      notes.push("If your playwright.config sets `workers`, keep it low (1-2) on HyperExecute — parallelism comes from `concurrency`.");
       if (profile.grid.usesLambdaTestHub) notes.push("Tests connect to LambdaTest via CDP (wss://cdp.lambdatest.com). That works from HyperExecute, but running browsers locally on the VM is usually faster.");
       break;
     case "cypress":
-      r.discovery.file = `${cd}${specFind("cypress", `\\( -name '*.cy.js' -o -name '*.cy.ts' -o -name '*.cy.jsx' -o -name '*.cy.tsx' \\)`)}`;
+      {
+        // Cypress <10 keeps specs in cypress/integration with any name; 10+ uses *.cy.* files
+        const legacy = files.some((f) => f.startsWith("cypress/integration/")) || parseInt(String(profile.dependencies.cypress || "").replace(/[^\d.]/g, ""), 10) < 10;
+        r.discovery.file = legacy
+          ? `${cd}${specFind("cypress/integration", `\\( -name '*.js' -o -name '*.ts' -o -name '*.jsx' -o -name '*.tsx' -o -name '*.feature' \\)`)}`
+          : `${cd}${specFind("cypress", `\\( -name '*.cy.js' -o -name '*.cy.ts' -o -name '*.cy.jsx' -o -name '*.cy.tsx' \\)`)}`;
+      }
       r.runner = () => `${cd}npx cypress run --spec "$test"`;
       r.tagRunner = `${cd}npx cypress run --env grepTags="$tag"`;
       r.uploadArtefacts.push({ name: "CypressArtifacts", path: ["cypress/videos/**", "cypress/screenshots/**", "mochawesome-report/**", "cypress/reports/**"] });
@@ -206,7 +251,11 @@ function nodeRecipe(profile, fw, opts) {
       break;
     case "webdriverio": {
       const cfg = profile.configFile || "wdio.conf.js";
-      r.discovery.file = `${cd}${specFind("test", `\\( -name '*.js' -o -name '*.ts' \\) -path '*spec*'`)}`;
+      {
+        const dirs = [...new Set(files.map((f) => path.posix.dirname(f)))];
+        const common = dirs.length ? dirs.reduce((a, b2) => { const x = a.split("/"), y = b2.split("/"); let i = 0; while (i < x.length && x[i] === y[i]) i++; return x.slice(0, i).join("/"); }) : "";
+        r.discovery.file = `${cd}${specFind(common || "test", `\\( -name '*.js' -o -name '*.ts' \\)${common ? "" : " -path '*spec*'"}`)}`;
+      }
       r.runner = () => `${cd}npx wdio run ${cfg} --spec "$test"`;
       r.tagRunner = `${cd}npx wdio run ${cfg} --mochaOpts.grep "$tag"`;
       r.uploadArtefacts.push({ name: "Reports", path: ["reports/**", "allure-results/**"] });
@@ -217,6 +266,7 @@ function nodeRecipe(profile, fw, opts) {
       const featRoot = profile.featureRoot || "features";
       r.discovery.feature = `${cd}find ${featRoot} -type f -name '*.feature'`;
       r.discovery.scenario = `${cd}grep -rnE '^[[:space:]]*Scenario( Outline| Template)?:' ${featRoot} --include='*.feature' | awk -F: '{print $1":"$2}'`;
+      r.discovery.tag = `${cd}`+`grep -rhoE '(^|[[:space:]])@[A-Za-z0-9_-]+' ${featRoot} --include='*.feature' | sed -E 's/^[[:space:]]*//' | sort -u`;
       r.runner = () => `${cd}npx cucumber-js "$test" --format json:reports/cucumber-$RANDOM.json`;
       r.tagRunner = `${cd}npx cucumber-js --tags "$tag" --format json:reports/cucumber-$RANDOM.json`;
       r.matrixValues.feature = profile.tests.features;
@@ -257,9 +307,17 @@ function pythonRecipe(profile, fw, opts) {
   const py = win ? "python" : "python3";
   const r = { env: {}, notes, discovery: {}, matrixValues: {}, uploadArtefacts: [] };
   const req = profile.requirementsFile;
-  r.pre = [req ? `pip3 install -r ${req} --cache-dir pip_cache` : `pip3 install -e . --cache-dir pip_cache`];
+  const extras = profile.pythonTestExtras || [];
+  r.pre = [
+    req ? `pip3 install -r ${req} --cache-dir pip_cache` :
+    profile.poetry ? `pip3 install poetry --cache-dir pip_cache && poetry config virtualenvs.create false && poetry install --no-interaction${(profile.poetryGroups || []).length ? " --with " + profile.poetryGroups.join(",") : ""}` :
+    extras.length ? `pip3 install -e ".[${extras.join(",")}]" --cache-dir pip_cache` :
+    `pip3 install -e . --cache-dir pip_cache`,
+  ];
+  if (!req && profile.poetry) notes.push("Installed with Poetry into the VM's Python (virtualenvs.create false), so python3 -m pytest sees the packages.");
+  if (!req && !profile.poetry && extras.length) notes.push(`No requirements file — installing the project with its test extras [${extras.join(",")}] from pyproject.toml.`);
   if (profile.drivers.includes("playwright")) r.pre.push(`${py} -m playwright install`);
-  r.cacheKey = `{{ checksum "${req || profile.buildFiles[0] || "requirements.txt"}" }}`;
+  r.cacheKey = `{{ checksum "${req || (profile.poetry && fs.existsSync(path.join(profile.repoPath, "poetry.lock")) ? "poetry.lock" : profile.buildFiles[0]) || "requirements.txt"}" }}`;
   r.cacheDirectories = ["pip_cache"];
   if (profile.runtimeVersion) r.runtime = { language: "python", version: String(profile.runtimeVersion) };
   const exclude = `-not -path '*/venv/*' -not -path '*/.venv/*' -not -path '*/site-packages/*'`;
@@ -277,6 +335,7 @@ function pythonRecipe(profile, fw, opts) {
     const featRoot = profile.featureRoot || "features";
     r.discovery.feature = `find ${featRoot} -type f -name '*.feature'`;
     r.discovery.scenario = `grep -rnE '^[[:space:]]*Scenario( Outline| Template)?:' ${featRoot} --include='*.feature' | awk -F: '{print $1":"$2}'`;
+    r.discovery.tag = `grep -rhoE '(^|[[:space:]])@[A-Za-z0-9_-]+' ${featRoot} --include='*.feature' | sed -E 's/^[[:space:]]*//' | sort -u`;
     r.runner = () => `${py} -m behave "$test" -f json.pretty -o reports/behave-$RANDOM.json -f pretty`;
     r.tagRunner = `${py} -m behave --tags="$tag" -f json.pretty -o reports/behave-$RANDOM.json -f pretty`;
     r.matrixValues.feature = profile.tests.features;
@@ -286,18 +345,26 @@ function pythonRecipe(profile, fw, opts) {
     return r;
   }
   // pytest
-  r.discovery.file = `find . -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) ${exclude} | sed 's#^\\./##'`;
+  const xdistOff = /(^|\s)-n\s*\S+|--numprocesses/.test(profile.pytestAddopts || "") ? " -n 0" : "";
+  const tpaths = (profile.pytestTestpaths || []).filter((d) => fs.existsSync(path.join(profile.repoPath, d)));
+  const where = tpaths.length ? tpaths.join(" ") : ".";
+  if (profile.pytestByContent) notes.push("Test files don't follow test_*.py naming; discovery finds files that define test functions (pytest collects them when passed explicitly).");
+  r.discovery.file = profile.pytestByContent
+    ? `grep -rlE --include='*.py' '^[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test' ${where} | grep -vE '(^|/)(conftest|setup)\\.py$|/(venv|\\.venv|site-packages)/' | sed 's#^\\./##'`
+    : `find ${where} -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) ${exclude} | sed 's#^\\./##'`;
   r.discovery.method =
-    `find . -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) ${exclude} | sed 's#^\\./##' | while read f; do ` +
+    `find ${where} -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) ${exclude} | sed 's#^\\./##' | while read f; do ` +
     `awk -v f="$f" '/^class[ \\t]+Test/{c=$2; sub(/[(:].*/,"",c); next} /^[^ \\t#@]/{c=""} /^[ \\t]*(async[ \\t]+)?def[ \\t]+test/{s=$0; sub(/.*def[ \\t]+/,"",s); sub(/\\(.*/,"",s); if (c!="" && $0 ~ /^[ \\t]/) print f"::"c"::"s; else if ($0 !~ /^[ \\t]/) print f"::"s}' "$f"; done`;
-  r.runner = () => `${py} -m pytest "$test" --junitxml=reports/junit-$RANDOM.xml`;
-  r.tagRunner = `${py} -m pytest -m "$tag" --junitxml=reports/junit-$RANDOM.xml`;
+  r.runner = () => `${py} -m pytest "$test"${xdistOff} --junitxml=reports/junit-$RANDOM.xml`;
+  r.tagRunner = `${py} -m pytest -m "$tag"${xdistOff} --junitxml=reports/junit-$RANDOM.xml`;
+  if (xdistOff) notes.push(`pytest addopts ("${profile.pytestAddopts}") turns on xdist; the runner adds -n 0 so each VM runs its share without extra workers — parallelism comes from concurrency.`);
+  if (tpaths.length) notes.push(`Discovery is limited to pytest testpaths: ${tpaths.join(", ")}.`);
   r.matrixValues.file = profile.tests.files;
   r.matrixValues.method = profile.tests.functions;
   r.matrixValues.tag = profile.tests.markers;
   r.partialReports = { location: "reports/", type: "xml", frameworkName: "junit" };
   r.uploadArtefacts.push({ name: "Reports", path: ["reports/**"] });
-  if (profile.dependencies.xdist) notes.push("pytest-xdist is installed — don't pass -n on HyperExecute; parallelism comes from `concurrency`.");
+  if (profile.dependencies.xdist && !xdistOff) notes.push("pytest-xdist is installed — don't pass -n on HyperExecute; parallelism comes from `concurrency`.");
   return r;
 }
 
@@ -315,6 +382,7 @@ function dotnetRecipe(profile, fw, opts) {
     `xargs awk 'FNR==1{ns="";d=0} /^[[:space:]]*namespace[[:space:]]/{ns=$2; gsub(/[;{]/,"",ns)} !d && /(^|[[:space:]])class[[:space:]]/{for(i=1;i<NF;i++) if($i=="class"){c=$(i+1); gsub(/[^A-Za-z0-9_].*/,"",c); print (ns!=""?ns".":"") c; d=1; break}}'`;
   r.runner = () => `${base} --filter "FullyQualifiedName~$test."`;
   r.tagRunner = `${base} --filter "TestCategory=$tag"`;
+  if (fw === "specflow") r.discovery.tag = `grep -rhoE '(^|[[:space:]])@[A-Za-z0-9_-]+' . --include='*.feature' | sed -E 's/^[[:space:]]*@//' | sort -u`;
   r.matrixValues.class = profile.tests.classes.map((c) => c.className);
   r.matrixValues.tag = [...new Set([...profile.tests.classes.flatMap((c) => c.categories || []), ...profile.tests.tags.map((t) => t.replace(/^@/, ""))])];
   r.matrixValues.none = ["all"];
@@ -440,6 +508,10 @@ function generateV02(profile, fw, name, opts) {
     notes.push(`The Java project lives in ${pr}/ — set as framework.workingDirectory.`);
   }
   if (opts.includeRuntime === false) delete doc.runtime;
+  if (opts.mavenProfile && profile.buildTool !== "gradle") {
+    framework.flags = [...(framework.flags || []), `-P${opts.mavenProfile}`];
+    pre = pre.map((c) => c.replace(/dependency:resolve/, `dependency:resolve -P${opts.mavenProfile}`));
+  }
   if (opts.flags?.length) framework.flags = [...(framework.flags || []), ...opts.flags];
 
   const env = buildEnv(profile, {}, opts, notes);
@@ -461,17 +533,20 @@ function generateV02(profile, fw, name, opts) {
 
 function buildEnv(profile, base, opts, notes) {
   const env = { ...base };
-  // The saved LambdaTest account is filled into these at run time (see credentials.runtimeConfig),
-  // so tests on the VMs can reach the grid without secrets being created in the portal.
-  env.LT_USERNAME = "${{ .secrets.LT_USERNAME }}";
-  env.LT_ACCESS_KEY = "${{ .secrets.LT_ACCESS_KEY }}";
+  // With a saved account its values go in directly; otherwise secret references are filled at run time
+  // (see credentials.runtimeConfig), so the VMs reach the grid without secrets created in the portal.
+  const creds = embeddedCredentials(opts);
+  env.LT_USERNAME = creds ? creds.username : "${{ .secrets.LT_USERNAME }}";
+  env.LT_ACCESS_KEY = creds ? creds.accessKey : "${{ .secrets.LT_ACCESS_KEY }}";
   for (const v of profile.envVars) {
     if (env[v]) continue;
     env[v] = SECRET_LIKE.test(v) ? `\${{ .secrets.${v} }}` : `<set ${v}>`;
   }
   Object.assign(env, opts.extraEnv || {});
   const secrets = Object.entries(env).filter(([, v]) => String(v).includes(".secrets.")).map(([k]) => k).filter((k) => !["LT_USERNAME", "LT_ACCESS_KEY"].includes(k));
-  notes.push("LT_USERNAME / LT_ACCESS_KEY are filled from your saved LambdaTest account when the Studio or MCP runs the job — no portal secrets needed. (Running the CLI by hand? Create them under HyperExecute → Settings → Secrets.)");
+  notes.push(creds
+    ? `LT_USERNAME / LT_ACCESS_KEY are your saved LambdaTest account (${creds.username}). The file contains your access key — don't commit it to a shared repo or send it to a customer. (Turn off with embedCredentials: false to use \${{ .secrets.* }} references instead.)`
+    : "LT_USERNAME / LT_ACCESS_KEY are filled from your saved LambdaTest account when the Studio or MCP runs the job — no portal secrets needed. Save your account once (Studio Setup card or set_lambdatest_credentials) and new YAMLs contain it directly.");
   if (secrets.length) notes.push(`Create these secrets in HyperExecute (Settings → Secrets) before running: ${secrets.join(", ")}.`);
   const placeholders = Object.entries(env).filter(([, v]) => String(v).startsWith("<set ")).map(([k]) => k);
   if (placeholders.length) notes.push(`Fill in values for env vars your code reads: ${placeholders.join(", ")} (remove any that aren't needed).`);
@@ -526,14 +601,16 @@ export function generateYaml(profile, options = {}) {
   const recipe = { java: javaRecipe, node: nodeRecipe, python: pythonRecipe, dotnet: dotnetRecipe }[lang](profile, fw, opts);
 
   let split = opts.splitBy || SPLITS[family][0];
-  if (split === "tag" && opts.executionMode === "autosplit") opts.executionMode = "matrix"; // tags are a fixed list → matrix
+  // Tags are a fixed list → matrix, unless autosplit was asked for and the tags can be discovered from files
+  const tagAutosplit = split === "tag" && options.executionMode === "autosplit" && recipe.discovery.tag;
+  if (split === "tag" && opts.executionMode === "autosplit" && !tagAutosplit) opts.executionMode = "matrix";
   if (split === "none") opts.executionMode = "matrix";
   if (!SPLITS[family].includes(split)) throw new Error(`splitBy "${split}" not supported for ${fw}. Options: ${SPLITS[family].join(", ")}`);
   const notes = [...recipe.notes];
   const warnings = [...profile.warnings];
 
   // runner
-  let runner = split === "tag" ? recipe.tagRunner : split === "suite" ? recipe.suiteRunner : split === "none" ? recipe.noneRunner : recipe.runner(split);
+  let runner = tagAutosplit ? recipe.tagRunner.replace(/\$tag/g, "$test") : split === "tag" ? recipe.tagRunner : split === "suite" ? recipe.suiteRunner : split === "none" ? recipe.noneRunner : recipe.runner(split);
   if (opts.runnerCommand) runner = opts.runnerCommand;
 
   const doc = {

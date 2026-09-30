@@ -7,6 +7,12 @@ import YAML from "yaml";
 import fs from "node:fs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// Keep feedback, dry-run history and the Confluence cache out of the real ~/.hyperexecute-studio
+{
+  const os = await import("node:os");
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
+  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache") });
+}
 const fx = (n) => path.join(here, "fixtures", n);
 
 const client = new Client({ name: "smoke", version: "1.0.0" });
@@ -63,14 +69,18 @@ check("playwright discovery", d.discovered === 2, d);
 
 // pytest
 g = await call("generate_hyperexecute_yaml", { repoPath: fx("pytest"), splitBy: "method" });
-check("pytest yaml", g.text.includes("python3 -m pytest") && g.text.includes("secrets.LT_ACCESS_KEY"), g.text);
+check("pytest yaml (saved account embedded, key masked in the reply)", g.text.includes("python3 -m pytest") && g.text.includes("LT_USERNAME: tester") && g.text.includes("LT_ACCESS_KEY: tes****") && !g.text.includes("test-key-123"), g.text);
+{
+  const gr = await call("generate_hyperexecute_yaml", { repoPath: fx("pytest"), embedCredentials: false });
+  check("embedCredentials:false keeps secret references", gr.text.includes("${{ .secrets.LT_ACCESS_KEY }}") && !gr.text.includes("LT_USERNAME: tester"), gr.text);
+}
 d = JSON.parse((await call("dry_run_test_discovery", { repoPath: fx("pytest"), command: extract(g, "command") })).text);
 check("pytest method discovery", d.discovered === 2 && d.items.includes("tests/test_login.py::TestCheckout::test_pay"), d);
 
 // Validator
-var v = JSON.parse((await call("validate_hyperexecute_yaml", { yamlContent: "version: 0.1\nrunson: ubuntu\nautosplit: true\nconcurency: 2\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test\nenv:\n  LT_ACCESS_KEY: abc123\nuploadArtifacts: []\n" })).text);
+var v = JSON.parse((await call("validate_hyperexecute_yaml", { yamlContent: "version: 0.1\nrunson: ubuntu\nautosplit: true\nconcurency: 2\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test\nenv:\n  API_TOKEN: abc123\n  LT_ACCESS_KEY: abc123\nuploadArtifacts: []\n" })).text);
 check("validator catches bad runson / missing $test / typo / secret / spelling",
-  v.errors.some((e) => e.includes("runson")) && v.errors.some((e) => e.includes("$test")) && v.warnings.some((w) => w.includes('"concurrency"')) && v.warnings.some((w) => w.includes("secret")) && v.errors.some((e) => e.includes("uploadArtefacts")), v);
+  v.errors.some((e) => e.includes("runson")) && v.errors.some((e) => e.includes("$test")) && v.warnings.some((w) => w.includes('"concurrency"')) && v.warnings.some((w) => w.includes("API_TOKEN") && w.includes("secret")) && !v.warnings.some((w) => w.includes("LT_ACCESS_KEY")) && v.info.some((i) => i.includes("LT_ACCESS_KEY")) && v.errors.some((e) => e.includes("uploadArtefacts")), v);
 
 
 // YAML v0.2
@@ -165,20 +175,100 @@ check("assertion failures → not a YAML problem", dl.diagnosis.status === "test
   let st1 = JSON.parse((await call("lambdatest_credentials_status", {})).text);
   check("saved account picked up, key masked", st1.saved && st1.username === "roshan" && st1.accessKey === "LT_****", st1);
   const gy = (await call("generate_hyperexecute_yaml", { repoPath: repo3, yamlVersion: "0.1", write: true, extraEnv: { BASE_URL: "https://example.com" } })).text;
-  check("YAML maps LT_USERNAME / LT_ACCESS_KEY as secret refs, no plain key", /LT_ACCESS_KEY: \$\{\{ \.secrets\.LT_ACCESS_KEY \}\}/.test(gy) && !gy.includes("LT_SavedKey"), gy.slice(0, 500));
+  const written = fs.readFileSync(path.join(repo3, "hyperexecute.yaml"), "utf8");
+  check("saved account goes into the written YAML; the reply shows the key masked", /LT_USERNAME: roshan/.test(written) && written.includes("LT_ACCESS_KEY: LT_SavedKey1234567890abcdefXYZ") && gy.includes("LT_ACCESS_KEY: LT_****") && !gy.includes("LT_SavedKey1234567890abcdefXYZ"), gy.slice(0, 600));
+  const sc3 = JSON.parse((await call("scan_credentials_and_reporting", { repoPath: repo3 })).text);
+  check("own account in the HyperExecute YAML is not flagged as a hard-coded credential", !sc3.credentials.some((c) => c.file === "hyperexecute.yaml"), sc3.credentials);
   let r = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo3 })).text);
   let s3 = JSON.parse((await call("get_hyperexecute_run", { runId: r.runId, waitSeconds: 30 })).text);
   const leftovers = fs.readdirSync(repo3).filter((n) => n.startsWith(".hyperexecute-run-"));
   const last = fs.readFileSync(path.join(repo3, ".fake-last-config"), "utf8");
   check("run used the saved account without asking", s3.status !== "running" && !/No LambdaTest account/.test(JSON.stringify(s3)), s3.status);
-  check("CLI got a temporary YAML with the credentials filled in", /^\.hyperexecute-run-.*\.yaml filled$/.test(last), last);
-  check("temporary YAML deleted; saved YAML still has only secret refs", leftovers.length === 0 && !fs.readFileSync(path.join(repo3, "hyperexecute.yaml"), "utf8").includes("LT_SavedKey"), leftovers);
+  check("CLI got the YAML with the account already in it (no temporary copy needed)", last === "hyperexecute.yaml filled", last);
+  check("no temporary YAML left behind", leftovers.length === 0, leftovers);
+  // with references (embedCredentials false) the run still fills them into a short-lived copy
+  await call("generate_hyperexecute_yaml", { repoPath: repo3, yamlVersion: "0.1", write: true, outputFileName: "hyperexecute.yaml", embedCredentials: false, extraEnv: { BASE_URL: "https://example.com" } });
+  const r4 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo3 })).text);
+  await call("get_hyperexecute_run", { runId: r4.runId, waitSeconds: 30 });
+  const last4 = fs.readFileSync(path.join(repo3, ".fake-last-config"), "utf8");
+  check("secret references are filled into a temporary copy, then deleted", /^\.hyperexecute-run-.*\.yaml filled$/.test(last4) && !fs.readdirSync(repo3).some((n) => n.startsWith(".hyperexecute-run-")) && !fs.readFileSync(path.join(repo3, "hyperexecute.yaml"), "utf8").includes("LT_SavedKey"), last4);
   check("key never in output", !JSON.stringify(s3).includes("LT_SavedKey1234567890abcdefXYZ"));
 }
 
 // Knowledge base
 let k = JSON.parse((await call("search_knowledge_base", { query: "cucumber report partialReports" })).text);
 check("local KB search", k.local.length > 0 && k.confluence.configured === false, k);
+k = JSON.parse((await call("search_knowledge_base", { query: "tests not found", source: "local" })).text);
+check("KB synonyms: 'tests not found' → 'Discovery finds 0 tests'", k.local[0]?.section === "Discovery finds 0 tests", k.local.map((x) => x.section));
+k = JSON.parse((await call("search_knowledge_base", { query: "playwright projects spread over VMs", source: "local" })).text);
+check("golden YAMLs are searchable", k.local.slice(0, 2).some((x) => x.topic === "golden/playwright-projects-matrix"), k.local.map((x) => x.topic));
+
+// ---------- harder layouts, confidence, questions ----------
+a = JSON.parse((await call("analyze_repo", { repoPath: fx("gradle-kts") })).text);
+check("gradle kts: junit5, java 21, modules", a.primaryFramework === "junit5" && a.runtimeVersion === "21" && a.gradleModules.join() === "api-tests,ui-tests", a);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("gradle-kts"), yamlVersion: "0.1" });
+d = JSON.parse((await call("dry_run_test_discovery", { repoPath: fx("gradle-kts"), command: extract(g) })).text);
+check("gradle multi-module: each item is a module task", d.items.includes("api-tests:test --tests com.acme.api.UsersApiTest") && g.text.includes("./gradlew :$test"), d);
+a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-profiles") })).text);
+check("maven profiles → medium confidence + question", a.confidence.level === "medium" && a.questions.some((q) => /Maven profile/.test(q)) && Object.keys(a)[0] === "confidence", a.confidence);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-profiles"), mavenProfile: "smoke" });
+check("mavenProfile → v0.2 flags -Psmoke", /flags:\n\s+- -Psmoke/.test(g.text) && g.text.includes("Confirm with the user"), g.text);
+a = JSON.parse((await call("analyze_repo", { repoPath: fx("pyproject-only") })).text);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("pyproject-only") });
+check("pyproject-only: extras install, -n 0, testpaths", a.runtimeVersion === "3.11" && g.text.includes('pip3 install -e ".[test]"') && g.text.includes('"$test" -n 0') && g.text.includes("find tests "), g.text);
+a = JSON.parse((await call("analyze_repo", { repoPath: fx("playwright-projects") })).text);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("playwright-projects") });
+check("playwright: script config, projects, script env", a.configFile === "e2e/pw.config.ts" && a.testDir === "e2e/specs" && a.playwrightProjects.length === 3 && g.text.includes("--config=e2e/pw.config.ts") && g.text.includes("TEST_ENV: staging"), g.text);
+a = JSON.parse((await call("analyze_repo", { repoPath: fx("node-monorepo") })).text);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("node-monorepo") });
+check("workspace monorepo: finds cypress package, installs at root", a.primaryFramework === "cypress" && a.packageRoot === "packages/e2e" && /pre:\n\s+- npm ci/.test(g.text) && g.text.includes("cd packages/e2e && npx cypress run"), g.text);
+
+// ---------- validator types + optional schema ----------
+v = JSON.parse((await call("validate_hyperexecute_yaml", { yamlContent: "version: 0.1\nrunson: linux\nautosplit: true\nconcurrency: \"5\"\nretryOnFailure: yes please\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test -Dtest=$test\npre: mvn install\n" })).text);
+check("validator: value types", v.errors.some((e) => /concurrency.*should be int.*remove the quotes/.test(e)) && v.errors.some((e) => /retryOnFailure.*should be bool/.test(e)) && v.errors.some((e) => /`pre` should be list/.test(e)), v.errors);
+{
+  const { checkSchema } = await import("../src/validator.js");
+  const errs = checkSchema({ runson: "ubuntu", concurrency: 0, extra: 1 }, { type: "object", required: ["version"], additionalProperties: false, properties: { runson: { enum: ["linux", "win"] }, concurrency: { type: "integer", minimum: 1 } } });
+  check("schema subset checker", errs.length === 4, errs);
+}
+
+// ---------- feedback: unknown failures saved (masked), grouped, reviewable ----------
+const weird = "Starting job\nconnecting to https://bob:LT_abcdefghijklmnopqrstuvwxyz123@hub.lambdatest.com/wd/hub\nFATAL: flux capacitor overheated at stage 3 (owner jane@acme.com)\nJob failed";
+let dk = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: weird })).text);
+dk = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: weird.replace("stage 3", "stage 7") })).text);
+const saved = fs.readdirSync(path.join(process.env.HE_FEEDBACK_DIR, "unmatched"));
+const savedText = saved.map((f) => fs.readFileSync(path.join(process.env.HE_FEEDBACK_DIR, "unmatched", f), "utf8")).join("\n");
+check("unknown failure saved for review", dk.savedForReview && saved.length === 2, dk);
+check("saved feedback is masked", !savedText.includes("LT_abcdefghijklmnopqrstuvwxyz123") && !savedText.includes("jane@acme.com") && !savedText.includes("bob:") && savedText.includes("flux capacitor"), savedText.slice(0, 800));
+let rv = JSON.parse((await call("review_diagnosis_feedback", {})).text);
+check("review groups the same failure (numbers ignored)", rv.unmatched.length === 1 && rv.unmatched[0].count === 2 && rv.unmatched[0].recurring, rv);
+rv = JSON.parse((await call("review_diagnosis_feedback", { markReviewed: [rv.unmatched[0].signature] })).text);
+check("markReviewed clears the group", rv.moved === 2 && rv.unmatched.length === 0, rv);
+dk = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: "Tests run: 5, Failures: 2\njava.lang.AssertionError: expected [x] but found [y]" })).text);
+check("recognized failures are not saved", !dk.savedForReview, dk);
+
+// ---------- discovery check: a green run with 0 tests is not "passed" ----------
+{
+  const os = await import("node:os");
+  const repo4 = fs.mkdtempSync(path.join(os.tmpdir(), "he-zero-"));
+  fs.cpSync(fx("maven-testng"), repo4, { recursive: true });
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, HE_FAKE: "zero", ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") } }));
+  await call("generate_hyperexecute_yaml", { repoPath: repo4, yamlVersion: "0.1", write: true, extraEnv: { BASE_URL: "https://example.com" } });
+  const dr = JSON.parse((await call("dry_run_test_discovery", { repoPath: repo4 })).text);
+  const r0 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo4 })).text);
+  const s0 = JSON.parse((await call("get_hyperexecute_run", { runId: r0.runId, waitSeconds: 30 })).text);
+  check("0-test green run is not reported as passed; discoveryCheck compares with the dry run", !/passed/.test(s0.status) && s0.discoveryCheck?.verdict === "zero-tests" && s0.discoveryCheck.expectedItems === dr.discovered, s0);
+  const oc = fs.readFileSync(path.join(process.env.HE_FEEDBACK_DIR, "outcomes.jsonl"), "utf8");
+  check("run outcome logged", oc.includes(r0.runId) && oc.includes('"discovery":"zero-tests"'), oc.slice(-400));
+}
+{
+  const { checkDiscovery, platformDiscoveredCount } = await import("../src/discovery-check.js");
+  check("CLI discovered-count parsing", platformDiscoveredCount("x\nDiscovered 12 tests\n") === 12 && platformDiscoveredCount("nothing") === null);
+  const prof = { tests: { classes: [{ methods: [1, 2, 3, 4, 5, 6] }], functions: [], scenarios: [] }, language: "java", primaryFramework: "testng" };
+  const c1 = checkDiscovery({ repo: "/nope", yamlText: "version: 0.1\nautosplit: true\n", profile: prof, output: "", tests: [{}, {}] });
+  check("fewer tests ran than the repo has → flagged", c1.verdict === "fewer-than-expected", c1);
+}
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
 await client.close();
