@@ -26,12 +26,14 @@ const SPLITS = {
   robot: ["file", "tag"],
   dotnet: ["class", "tag"],
   specflow: ["tag", "none"],
+  "ruby-rspec": ["file", "method", "tag"],
+  "ruby-cucumber": ["feature", "scenario", "tag"],
 };
 
 function pickFramework(profile, override) {
   if (override) return override;
   const fws = profile.frameworks;
-  const order = ["cucumber", "testng", "junit5", "junit4", "spock", "karate", "playwright", "cypress", "webdriverio", "cucumber-js", "nightwatch", "testcafe", "jest", "mocha", "robot", "behave", "pytest-bdd", "pytest", "specflow", "nunit", "xunit", "mstest"];
+  const order = ["cucumber", "testng", "junit5", "junit4", "spock", "karate", "playwright", "cypress", "webdriverio", "cucumber-js", "nightwatch", "testcafe", "jest", "mocha", "robot", "behave", "pytest-bdd", "pytest", "cucumber-ruby", "rspec", "specflow", "nunit", "xunit", "mstest"];
   return order.find((f) => fws.includes(f)) || fws[0] || null;
 }
 
@@ -45,6 +47,8 @@ function familyOf(fw) {
   if (fw === "robot") return "robot";
   if (fw === "specflow") return "specflow";
   if (["nunit", "xunit", "mstest"].includes(fw)) return "dotnet";
+  if (fw === "rspec") return "ruby-rspec";
+  if (fw === "cucumber-ruby") return "ruby-cucumber";
   return null;
 }
 
@@ -393,6 +397,48 @@ function dotnetRecipe(profile, fw, opts) {
   return r;
 }
 
+// Ruby (Bundler): RSpec split by spec file or by example (file:line), Cucumber by feature/scenario/tag.
+// Mirrors LambdaTest's Ruby and Capybara HyperExecute samples.
+function rubyRecipe(profile, fw, opts) {
+  const notes = [];
+  const r = { env: {}, notes, discovery: {}, matrixValues: {}, uploadArtefacts: [] };
+  const cd = profile.packageRoot ? `cd ${profile.packageRoot} && ` : "";
+  const inPkg = (f) => (profile.packageRoot ? path.posix.join(profile.packageRoot, f) : f);
+  const rel = (f) => (profile.packageRoot && f.startsWith(profile.packageRoot + "/") ? f.slice(profile.packageRoot.length + 1) : f);
+  r.pre = [`${cd}bundle config set --local path vendor/bundle`, `${cd}bundle install`];
+  r.cacheKey = `{{ checksum "${profile.lockFile || inPkg("Gemfile")}" }}`;
+  r.cacheDirectories = [inPkg("vendor/bundle")];
+  if (profile.runtimeVersion) r.runtime = { language: "ruby", version: String(profile.runtimeVersion) };
+  else notes.push("No Ruby version found (.ruby-version or ruby in the Gemfile); the VM's default Ruby is used. Add runtime: { language: ruby, version: \"3.x\" } to pin it.");
+  if (!profile.lockFile) notes.push("No Gemfile.lock: bundle install resolves versions on every VM. Commit Gemfile.lock for repeatable runs and a working cache.");
+  if (fw === "cucumber-ruby") {
+    const featRoot = rel(profile.featureRoot || "features");
+    r.discovery.feature = `${cd}find ${featRoot} -type f -name '*.feature'`;
+    r.discovery.scenario = `${cd}grep -rnE '^[[:space:]]*Scenario( Outline| Template)?:' ${featRoot} --include='*.feature' | awk -F: '{print $1":"$2}'`;
+    r.discovery.tag = `${cd}grep -rhoE '(^|[[:space:]])@[A-Za-z0-9_-]+' ${featRoot} --include='*.feature' | sed -E 's/^[[:space:]]*//' | sort -u`;
+    r.runner = () => `${cd}bundle exec cucumber "$test" --format pretty --format json --out reports/cucumber-$RANDOM.json`;
+    r.tagRunner = `${cd}bundle exec cucumber --tags "$tag" --format pretty --format json --out reports/cucumber-$RANDOM.json`;
+    r.matrixValues.feature = profile.tests.features.map(rel);
+    r.matrixValues.scenario = profile.tests.scenarios.map(rel);
+    r.matrixValues.tag = profile.tests.tags;
+    r.partialReports = { location: inPkg("reports/"), type: "json", frameworkName: "cucumber" };
+    r.uploadArtefacts.push({ name: "Reports", path: [inPkg("reports/**")] });
+    return r;
+  }
+  const specs = `grep -rlE '^[[:space:]]*(RSpec\\.)?describe[[:space:](]' spec --include='*.rb'`;
+  r.discovery.file = `${cd}${specs}`;
+  // -H: print the file name even when there is only one spec file
+  r.discovery.method = `${cd}${specs} | xargs grep -HnE '^[[:space:]]*(it|specify|example|scenario)[[:space:](]' | awk -F: '{print $1":"$2}'`;
+  r.runner = () => `${cd}bundle exec rspec "$test" --format progress --format html --out reports/rspec-$RANDOM.html`;
+  r.tagRunner = `${cd}bundle exec rspec --tag "$tag" --format progress --format html --out reports/rspec-$RANDOM.html`;
+  r.matrixValues.file = profile.tests.files.map(rel);
+  r.matrixValues.method = profile.tests.functions.map(rel);
+  r.matrixValues.tag = profile.tests.markers;
+  r.uploadArtefacts.push({ name: "RSpecReports", path: [inPkg("reports/**")] });
+  notes.push("RSpec HTML reports are kept as artefacts (reports/). For a combined HyperExecute report, add the rspec_junit_formatter gem and a JUnit XML formatter.");
+  return r;
+}
+
 function safeRead(root, rel) {
   try {
     return fs.readFileSync(path.join(root, rel), "utf8");
@@ -597,8 +643,8 @@ export function generateYaml(profile, options = {}) {
     return { yaml: render(profile, r.doc, { framework: fw, mode: "autosplit (native discovery)", split: r.split }, opts), yamlVersion: "0.2", framework: fw, splitBy: r.split, executionMode: "autosplit", supportedSplits: fw === "testng" ? ["class", "method", "suite"] : ["class", "method"], notes: r.notes, warnings: r.warnings };
   }
 
-  const lang = family.startsWith("java") ? "java" : family.startsWith("node") ? "node" : ["pytest", "behave", "robot"].includes(family) ? "python" : "dotnet";
-  const recipe = { java: javaRecipe, node: nodeRecipe, python: pythonRecipe, dotnet: dotnetRecipe }[lang](profile, fw, opts);
+  const lang = family.startsWith("java") ? "java" : family.startsWith("node") ? "node" : family.startsWith("ruby") ? "ruby" : ["pytest", "behave", "robot"].includes(family) ? "python" : "dotnet";
+  const recipe = { java: javaRecipe, node: nodeRecipe, python: pythonRecipe, dotnet: dotnetRecipe, ruby: rubyRecipe }[lang](profile, fw, opts);
 
   let split = opts.splitBy || SPLITS[family][0];
   // Tags are a fixed list → matrix, unless autosplit was asked for and the tags can be discovered from files

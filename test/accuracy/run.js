@@ -19,6 +19,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
@@ -39,7 +40,8 @@ function loadCases() {
     const c = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
     for (const one of [].concat(c)) cases.push({ ...one, repo: path.resolve(here, "..", "fixtures", one.repo), origin: "committed" });
   }
-  const priv = process.env.HE_ACCURACY_CASES;
+  // private cases: HE_ACCURACY_CASES, else the passing runs saved on this machine (src/learning.js)
+  const priv = process.env.HE_ACCURACY_CASES || path.join(os.homedir(), ".hyperexecute-studio", "accuracy-cases");
   if (priv && fs.existsSync(priv)) {
     for (const d of fs.readdirSync(priv, { withFileTypes: true }).filter((e) => e.isDirectory() && !/^[_.]/.test(e.name))) {
       const base = path.join(priv, d.name);

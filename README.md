@@ -8,10 +8,10 @@ Reads a test-automation repo, detects its stack, and generates, validates and dr
 
 | By the numbers (v1.7.1) | |
 |---|---|
-| **99.5%** correct on real repos | measured on 23 of LambdaTest's own sample repos (88.1% before the 6 gaps this found were fixed) |
-| **20** test frameworks | Java, Node, Python, .NET |
-| **18** tools for Claude and Copilot | analyze, build, run, fix |
-| **72** automated checks | run on every release |
+| **99.5%** correct on real repos | 215 of 216 checks across 45 cases, including 25 of LambdaTest's own sample repos |
+| **22** test frameworks | Java, Node, Python, .NET, Ruby |
+| **19** tools for Claude and Copilot | analyze, build, run, fix, CI |
+| **148** automated checks | 87 for the core, 61 in a real browser for the web version |
 | **10 files** in the protected `.vsix` | was 4,741 files, 6.4 MB |
 
 ### How they work together
@@ -42,13 +42,13 @@ sequenceDiagram
 
 | | Claude | HyperExecute Studio |
 |---|---|---|
-| What it is | A general AI model that understands language and reasons | An MCP server with 18 HyperExecute / LambdaTest tools, also shipped inside the VS Code extension |
+| What it is | A general AI model that understands language and reasons | An MCP server with 19 HyperExecute / LambdaTest tools, also shipped inside the VS Code extension and a browser version |
 | Intelligence | Understands the request, plans the steps, writes and edits code | None: fixed rules for detection, YAML building, validation and log diagnosis |
 | HyperExecute knowledge | General training knowledge; may be outdated or incomplete | Exact rules (v0.1 vs v0.2, the v0.2 `testDiscovery` 0-tests trap, `runson`, `$test`), a bundled knowledge base, 10 example YAMLs and the live Confluence `HYP` space |
 | Access to your systems | Only the tools it is given | Your LambdaTest account, live browser/OS lists, local test discovery, the HyperExecute CLI, job logs and reports |
 | Output | Can vary between runs | The same input always gives the same YAML and the same validation result |
-| Measured accuracy | Not measured for HyperExecute | 100% on 18 fixture cases; 99.5% on 23 LambdaTest sample repos |
-| Works on | Any task | HyperExecute test-automation repos: Java, Node, Python, .NET |
+| Measured accuracy | Not measured for HyperExecute | 100% on 20 fixture cases; 99.5% across 45 cases including 25 LambdaTest sample repos |
+| Works on | Any task | HyperExecute test-automation repos: Java, Node, Python, .NET, Ruby |
 
 ### What each adds
 
@@ -60,6 +60,7 @@ sequenceDiagram
 | Build the YAML | `generate_hyperexecute_yaml`, `optimize_hyperexecute_yaml` | A YAML for the detected framework (v0.2 native runner or v0.1), with your saved LambdaTest account already in it; ranked speed and cost fixes |
 | Check it | `validate_hyperexecute_yaml`, `dry_run_test_discovery` | Key, type and v0.1/v0.2 rule checks; the real list of tests discovered on your machine |
 | Run and fix | `run_hyperexecute_job`, `get_hyperexecute_run`, `fix_and_rerun_hyperexecute`, `diagnose_hyperexecute_logs` | Live logs, a diagnosis per failed test, YAML fixes, reruns of only the affected tests, and a warning when a green job ran 0 tests |
+| Run from CI | `generate_ci_pipeline` | A GitHub Actions, GitLab CI, Jenkins or Azure DevOps file that runs the YAML on every push, with the account from the CI's secrets |
 | Stay safe | `scan_credentials_and_reporting`, `fix_hardcoded_credentials` | Hard-coded customer credentials and customer-side reporting (TestRail, Jira, Slack…) found before anything runs |
 | Connect to LambdaTest | `set_lambdatest_credentials`, `lambdatest_credentials_status`, `generate_lambdatest_capabilities` | One saved account used everywhere; grid capabilities from live browser/OS lists |
 | Know more | `search_knowledge_base`, `get_confluence_page`, `knowledge_base_status` | Search across the bundled notes, example YAMLs and Confluence, with synonyms |
@@ -97,7 +98,8 @@ Claude alone can write a YAML that looks right; HyperExecute Studio catches the 
 | `knowledge_base_status` | Lists KB topics and tests the Confluence login |
 | `scan_credentials_and_reporting` | Finds hard-coded LambdaTest usernames/access keys (masked) and integrations that report to the customer's side (TestRail, Jira/Xray, ReportPortal, Slack/Teams, email, Allure TestOps, Cypress Cloud, Percy/Applitools, other grids) |
 | `fix_hardcoded_credentials` | Rewrites hard-coded credentials to read `LT_USERNAME` / `LT_ACCESS_KEY`. Dry run by default |
-| `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists. Can write a helper file |
+| `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists; Appium real-device capabilities for mobile repos (Java, Python, Node). Can write a helper file |
+| `generate_ci_pipeline` | GitHub Actions, GitLab CI, Jenkins or Azure DevOps file that runs the YAML from the customer's CI: downloads the CLI, takes `LT_USERNAME` / `LT_ACCESS_KEY` from the CI secrets, fails the build on failure, keeps the logs |
 | `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
 | `set_lambdatest_credentials` | Verifies and saves your LambdaTest account once (shared with the Studio) |
 | `lambdatest_credentials_status` | Which account runs will use (key masked) |
@@ -109,7 +111,7 @@ Claude alone can write a YAML that looks right; HyperExecute Studio catches the 
 
 Prompt: `create_hyperexecute_yaml` runs the whole workflow.
 
-Supported: Java (Maven/Gradle), including TestNG, JUnit 4/5 and Cucumber · Node, including Playwright, Cypress, WebdriverIO, cucumber-js, Jest, Mocha, Nightwatch and TestCafe · Python, including pytest, Behave and Robot · .NET, including NUnit, xUnit, MSTest and SpecFlow.
+Supported: Java (Maven/Gradle), including TestNG, JUnit 4/5, Spock and Cucumber · Node, including Playwright, Cypress, WebdriverIO, cucumber-js, Jest, Mocha, Nightwatch and TestCafe · Python, including pytest, Behave and Robot · .NET, including NUnit, xUnit, MSTest, SpecFlow and Reqnroll · Ruby, including RSpec and Cucumber/Capybara.
 
 ## Setup
 ```bash
@@ -124,6 +126,16 @@ claude mcp add hyperexecute -s user -- npx -y github:roshanLambdatest/HyperMCP
 # optional Confluence: add  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token>  before the --
 ```
 The server (named `hyperexecute`) analyzes the folder Claude Code is running in. Upgrading from 1.7.0 or older? Remove the old name first: `claude mcp remove hyperexecute-yaml -s user`. Needs Node.js 18+.
+
+## How it gets better with use
+
+Claude can't be retrained, but the agent around it learns from real use. Everything stays on the machine (`~/.hyperexecute-studio`); `HE_LEARN=off` turns it off.
+
+- **Playbook for any AI client.** The MCP server sends its workflow and rules (ask before guessing, check existing YAMLs first, never rerun code failures, a 0-test pass is a failure) as MCP instructions when a client connects, so Claude and Copilot follow them without being told.
+- **Claude Code skill.** `claude-skill/hyperexecute-studio/SKILL.md` loads automatically for anything about HyperExecute. Install it once: `mkdir -p ~/.claude/skills && cp -r claude-skill/hyperexecute-studio ~/.claude/skills/`.
+- **Usual settings.** Options chosen the same way twice for a framework (OS, VMs, split, retries, timeout, tunnel) become the starting point for that framework. The reply says so; explicit options or `useLearned: false` override. The web version remembers them per browser.
+- **Passing runs become accuracy cases.** Every job that passes saves its repo and YAML (credentials as references only) to `~/.hyperexecute-studio/accuracy-cases`, which `npm run accuracy` checks by default, so a change that breaks a setup that really worked is caught.
+- **Unrecognized failures** are saved for the weekly rule review (below).
 
 ## Accuracy check
 ```bash

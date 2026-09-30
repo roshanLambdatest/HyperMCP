@@ -21,8 +21,29 @@ import { capabilityOptions, generateConnection, findDriverSetup } from "./capabi
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
+import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
+import { withLearned, recordChoice, saveSuccessCase } from "./learning.js";
 
-const server = new McpServer({ name: "hyperexecute", version: "1.7.1" });
+// Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
+const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
+
+Workflow for "set up HyperExecute" (or anything like it):
+1. analyze_repo first. If confidence is not "high", show the assumptions and ASK its questions before generating; never guess a Maven profile, env values or which framework runs.
+2. If analyze_repo lists existingHyperExecuteYamls, offer to validate_hyperexecute_yaml + optimize_hyperexecute_yaml that file before generating a new one.
+3. scan_credentials_and_reporting before any run; offer fix_hardcoded_credentials when it finds the customer's keys in code.
+4. generate_hyperexecute_yaml with only the options the user asked for (it starts from their learned usual settings), then validate_hyperexecute_yaml. For v0.1, dry_run_test_discovery and compare the count with the tests analyze_repo found.
+5. Write the file (write: true) only after the user agrees. Offer generate_ci_pipeline when they want runs from CI.
+6. run_hyperexecute_job, then get_hyperexecute_run until done. Follow its "next". On fixable failures use fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test-failures (code bugs) or auth errors: report them.
+7. A green run with discoveryCheck "zero-tests" is a failure: fix discovery before calling it done.
+
+Rules that matter:
+- YAML v0.2 (framework:) exists only for Maven/Gradle TestNG, JUnit 4/5, Spock and .NET NUnit/MSTest, and must never contain testDiscovery (the job would run 0 tests). Tags, files, features, scenarios, matrix mode and custom commands need v0.1.
+- runson is linux, mac, mac13, win or win11. Cross-browser or multi-OS = matrix axes in v0.1.
+- Values the tests read (BASE_URL…) come from the user: ask, never invent. Secrets stay \${{ .secrets.X }} unless the user saved their own LambdaTest account.
+- When no rule explains a failure, read the logDigest, propose a minimal YAML change, validate it, then fix_and_rerun_hyperexecute with yamlContent. Unrecognized failures are saved for review_diagnosis_feedback.
+- search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
+
+const server = new McpServer({ name: "hyperexecute", version: "1.8.0" }, { instructions: INSTRUCTIONS });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -85,13 +106,25 @@ server.registerTool(
       includeRuntime: z.boolean().optional(),
       outputFileName: z.string().optional().describe("File name to write, e.g. hyperexecute.yaml"),
       write: z.boolean().optional().describe("Write the YAML into the repo (default false — just return it)"),
+      useLearned: z.boolean().optional().describe("Default true: start from the options this user chose repeatedly for this framework (their usual OS, VMs, split…). Explicit options always win"),
     },
   },
   async (args) => {
     try {
       const repo = resolveRepo(args.repoPath);
       const profile = analyzeRepo(repo);
-      const result = generateYaml(profile, args);
+      const explicit = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined));
+      let { options: opts, learned } = args.useLearned === false ? { options: explicit, learned: {} } : withLearned(profile, explicit);
+      let result;
+      try {
+        result = generateYaml(profile, opts);
+      } catch (e) {
+        if (!Object.keys(learned).length) throw e;
+        // a learned choice that doesn't fit this repo (e.g. a split its framework lacks): drop what was learned
+        ({ options: opts, learned } = { options: explicit, learned: {} });
+        result = generateYaml(profile, opts);
+      }
+      if (args.write) recordChoice(profile, explicit);
       const validation = validateYaml(result.yaml, repo);
       let written;
       if (args.write) {
@@ -112,6 +145,7 @@ server.registerTool(
           `\nYAML v${result.yamlVersion} | framework: ${result.framework} | mode: ${result.executionMode} | split: ${result.splitBy} (supported: ${result.supportedSplits.join(", ")})`,
           result.notes.length ? `\nNotes:\n- ${result.notes.join("\n- ")}` : "",
           result.warnings.length ? `\nWarnings:\n- ${result.warnings.join("\n- ")}` : "",
+          Object.keys(learned).length ? `\nUsing this user's usual settings for ${result.framework}: ${Object.entries(learned).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")} (learned from earlier choices; pass the option explicitly, or useLearned:false, to override).` : "",
           profile.confidence?.level !== "high" ? `\nConfidence: ${profile.confidence.level} (${profile.confidence.reasons.join("; ")})` : "",
           profile.assumptions?.length ? `\nAssumptions:\n- ${profile.assumptions.join("\n- ")}` : "",
           profile.questions?.length ? `\nConfirm with the user:\n- ${profile.questions.join("\n- ")}` : "",
@@ -352,6 +386,11 @@ server.registerTool(
       visual: z.boolean().optional(),
       tunnel: z.boolean().optional(),
       headless: z.boolean().optional(),
+      mobile: z.boolean().optional().describe("Appium on LambdaTest real devices (default: on when the repo uses Appium). Java, Python and Node"),
+      mobilePlatform: z.enum(["Android", "iOS"]).optional(),
+      device: z.string().optional().describe('Real device name, e.g. "Galaxy S23", "iPhone 15"'),
+      platformVersion: z.string().optional(),
+      app: z.string().optional().describe("lt://APP_ID of the app uploaded to LambdaTest"),
       writeHelper: z.boolean().optional(),
     },
   },
@@ -449,6 +488,10 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     rec.discoveryCheck = checkDiscovery({ repo, yamlPath: mainConfig, yamlText, profile, output: r.output, tests: evidence.tests, targeted: rec.targeted });
     // A green job that ran nothing is the expensive failure — don't report it as passed.
     if (rec.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(rec.status)) rec.status = "needs-attention";
+    if (!r.stopped && rec.status === "passed" && !rec.targeted) {
+      rec.savedCase = saveSuccessCase({ repo, yamlText, profile, jobId: rec.diagnosis.jobId });
+      recordChoice(profile, readOptionsFromYaml(yamlText));
+    }
     if (!r.stopped) {
       rec.feedbackFile = recordUnmatched({ source: "run", runId: id, diagnosis: { ...rec.diagnosis, status: rec.status }, logText: evidence.text, profile, yamlText });
       recordOutcome({ event: "result", runId: id, parent, attempt, status: rec.status, ruleIds: rec.diagnosis.diagnoses.map((d) => d.id), discovery: rec.discoveryCheck.verdict, framework: profile.primaryFramework });
@@ -456,6 +499,16 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
   });
   runs.set(id, rec);
   return rec;
+}
+
+// the choices a YAML embodies, for learning from a run that passed
+function readOptionsFromYaml(text) {
+  try {
+    const d = YAML.parse(String(text).replace(/\$\{\{[^}]*\}\}/g, "x")) || {};
+    return { runson: typeof d.runson === "string" && !d.runson.includes("$") ? d.runson : undefined, concurrency: d.concurrency, retryOnFailure: d.retryOnFailure, maxRetries: d.maxRetries, globalTimeout: d.globalTimeout, tunnel: d.tunnel || undefined };
+  } catch {
+    return {};
+  }
 }
 
 function runView(rec, tailChars = 3000) {
@@ -470,6 +523,7 @@ function runView(rec, tailChars = 3000) {
     targetedRerun: rec.targeted || undefined,
     diagnosis: d,
     discoveryCheck: rec.discoveryCheck && rec.discoveryCheck.verdict !== "ok" ? rec.discoveryCheck : rec.discoveryCheck ? { verdict: "ok", platformDiscovered: rec.discoveryCheck.platformDiscovered, executedTests: rec.discoveryCheck.executedTests } : undefined,
+    savedAsAccuracyCase: rec.savedCase ? "This passing setup was saved as an accuracy case, so future versions are checked against it." : undefined,
     savedForReview: rec.feedbackFile ? "The unexplained part of this failure was saved (masked) for rule review — see review_diagnosis_feedback." : undefined,
     logFiles: rec.evidence?.files,
     logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
@@ -656,6 +710,42 @@ server.registerTool(
         if (write) { fs.writeFileSync(file, next); out.written = file; }
       } else if (!d.diagnoses.length) out.logDigest = logDigest(text_);
       return text(out);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "generate_ci_pipeline",
+  {
+    title: "Generate a CI pipeline that runs HyperExecute",
+    description:
+      "Write the CI file that runs the repo's HyperExecute YAML from the customer's own CI: GitHub Actions, GitLab CI, Jenkins or Azure DevOps. Downloads the CLI, takes LT_USERNAME / LT_ACCESS_KEY from the CI's secret store (filling ${{ .secrets.* }} references into a temporary copy when the YAML uses them), fails the build when the job fails, and keeps the job logs as an artifact. USE after the YAML is written and validated, when the user wants runs on every push or from CI. write:true saves it (refuses to overwrite).",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      ci: z.enum(Object.keys(CI_SYSTEMS)).describe("github | gitlab | jenkins | azure"),
+      yamlPath: z.string().optional().describe("Default hyperexecute.yaml"),
+      branch: z.string().optional().describe("Branch that triggers runs (default main)"),
+      write: z.boolean().optional(),
+    },
+  },
+  async ({ repoPath, ci, yamlPath = "hyperexecute.yaml", branch, write }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const yamlFile = path.resolve(repo, yamlPath);
+      const yaml = fs.existsSync(yamlFile) ? fs.readFileSync(yamlFile, "utf8") : "";
+      const p = generatePipeline({ ci, configFile: yamlPath, yaml, branch });
+      let written = "";
+      if (write) {
+        const out = path.join(repo, p.path);
+        if (fs.existsSync(out)) throw new Error(`${p.path} already exists — not overwriting. Merge the job in by hand.`);
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, p.content);
+        written = `\nWritten: ${p.path}`;
+      }
+      const missing = yaml ? "" : `\n(${yamlPath} not found yet — generate and write it first)`;
+      return text(`${p.name} → ${p.path}${written}${missing}\n\n\`\`\`\n${p.content}\`\`\`\n\nNotes:\n- ${p.notes.join("\n- ")}`);
     } catch (e) {
       return fail(e);
     }

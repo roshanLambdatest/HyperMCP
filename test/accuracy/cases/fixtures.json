@@ -244,5 +244,30 @@
         "-r requirement.txt"
       ]
     }
+  },
+  {
+    "name": "ruby rspec: split by file",
+    "repo": "ruby-rspec",
+    "expected": {
+      "language": "ruby",
+      "framework": "rspec",
+      "discovered": 1,
+      "runnerContains": [
+        "bundle exec rspec \"$test\""
+      ],
+      "preContains": [
+        "bundle install"
+      ]
+    }
+  },
+  {
+    "name": "ruby rspec: split by example (file:line)",
+    "repo": "ruby-rspec",
+    "options": {
+      "splitBy": "method"
+    },
+    "expected": {
+      "discovered": 2
+    }
   }
 ]

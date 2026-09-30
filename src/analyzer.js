@@ -189,6 +189,34 @@ function readJson(root, f) {
   }
 }
 
+function analyzeRuby(root, files, profile) {
+  const gemfile = files.find((f) => f === "Gemfile" || f.endsWith("/Gemfile"));
+  const rbFiles = byExt(files, ".rb");
+  if (profile.language || (!gemfile && !rbFiles.length)) return;
+  const gemText = gemfile ? read(root, gemfile) : "";
+  const gem = (n) => new RegExp(`^\\s*gem\\s+['"]${n}['"]`, "m").test(gemText);
+  const specFiles = rbFiles.filter((f) => /(^|\/)spec\//.test(f) && !/(^|\/)(spec_helper|rails_helper)\.rb$|\/support\//.test(f) && /^\s*(RSpec\.)?describe[\s(]/m.test(read(root, f)));
+  const hasSteps = rbFiles.some((f) => /step_definitions\//.test(f));
+  if (!gemfile && !specFiles.length && !hasSteps) return;
+  profile.language = "ruby";
+  profile.buildTool = gemfile ? "bundler" : null;
+  if (gemfile) profile.buildFiles.push(gemfile);
+  profile.lockFile = files.find((f) => /(^|\/)Gemfile\.lock$/.test(f)) || null;
+  profile.packageRoot = gemfile && gemfile.includes("/") ? path.posix.dirname(gemfile) : "";
+  const rv = read(root, ".ruby-version").trim() || (gemText.match(/^\s*ruby\s+['"]([\d.]+)/m) || [])[1];
+  if (rv) profile.runtimeVersion = rv.replace(/^ruby-/, "");
+  if (gem("cucumber") || hasSteps) profile.frameworks.push("cucumber-ruby");
+  if (gem("rspec") || gem("rspec-core") || specFiles.length) profile.frameworks.push("rspec");
+  if (gem("selenium-webdriver") || gem("watir") || gem("capybara")) profile.drivers.push("selenium");
+  if (gem("appium_lib") || gem("appium_lib_core")) profile.drivers.push("appium");
+  if (gem("capybara")) profile.dependencies.capybara = true;
+  // RSpec examples as file:line, the same unit `rspec spec/x_spec.rb:12` runs
+  profile.tests.files = specFiles;
+  profile.tests.functions = specFiles.flatMap((f) => read(root, f).split("\n").map((l, i) => (/^\s*(it|specify|example|scenario)[\s(]/.test(l) ? `${f}:${i + 1}` : null)).filter(Boolean));
+  profile.tests.markers = uniq(specFiles.flatMap((f) => [...read(root, f).matchAll(/,\s*:(\w+)\s*(?:=>\s*true)?\s*do\b|,\s*(\w+):\s*true\s*do\b/g)].map((m) => m[1] || m[2])));
+  profile.reports.push(profile.frameworks[0] === "cucumber-ruby" ? "cucumber-json" : "rspec-html");
+}
+
 function analyzeNode(root, allFiles, profile) {
   const pkgFiles = allFiles.filter((f) => f === "package.json" || f.endsWith("/package.json"));
   if (!pkgFiles.length) return;
@@ -439,6 +467,7 @@ function analyzeGridAndEnv(root, files, profile) {
     node: /\.([cm]?[jt]sx?|json|ya?ml|env)$/,
     python: /\.(py|robot|ini|cfg|toml|ya?ml|json|env)$/,
     csharp: /\.(cs|json|config|runsettings|ya?ml|env)$/,
+    ruby: /\.(rb|ya?ml|json|env|feature)$/,
   }[profile.language] || /\.(java|kt|[cm]?[jt]s|py|cs|rb|properties|json|ya?ml|env|conf|ini|robot)$/;
   const scope = profile.projectRoot || profile.packageRoot || "";
   const srcFiles = files.filter((f) => exts.test(f) && !f.includes("package-lock") && (!scope || f.startsWith(scope + "/")));
@@ -454,6 +483,7 @@ function analyzeGridAndEnv(root, files, profile) {
     for (const m of src.matchAll(/process\.env\.(\w+)|process\.env\[['"](\w+)['"]\]/g)) envVars.add(m[1] || m[2]);
     for (const m of src.matchAll(/os\.(?:environ\.get|getenv)\(\s*['"](\w+)['"]|os\.environ\[['"](\w+)['"]\]/g)) envVars.add(m[1] || m[2]);
     for (const m of src.matchAll(/Environment\.GetEnvironmentVariable\(\s*"(\w+)"/g)) envVars.add(m[1]);
+    for (const m of src.matchAll(/\bENV(?:\[\s*['"](\w+)['"]\s*\]|\.fetch\(\s*['"](\w+)['"])/g)) envVars.add(m[1] || m[2]);
     for (const m of src.matchAll(/%ENV\{(\w+)\}|\$\{ENV:(\w+)\}|%\{(\w+)\}/g)) envVars.add(m[1] || m[2] || m[3]);
     for (const m of src.matchAll(/(https?:\/\/[^"'\s]*(?:lambdatest\.com|:4444)[^"'\s]*)/g)) hubs.add(m[1].replace(/\/\/[^@/]+@/, "//<creds>@"));
     if (src.includes("LT:Options") || src.includes("lt:options")) usesLtOptions = true;
@@ -507,7 +537,7 @@ function assessConfidence(profile) {
   // Several frameworks in one repo
   const runners = profile.frameworks.filter((f) => !["serenity", "karate", "pytest-bdd"].includes(f));
   if (runners.length > 1) {
-    const pairs = { "cucumber+testng": "Cucumber running on TestNG", "cucumber+junit5": "Cucumber on the JUnit Platform", "cucumber+junit4": "Cucumber on JUnit 4" };
+    const pairs = { "cucumber+testng": "Cucumber running on TestNG", "cucumber+junit5": "Cucumber on the JUnit Platform", "cucumber+junit4": "Cucumber on JUnit 4", "cucumber-ruby+rspec": "Cucumber (Ruby) with RSpec expectations" };
     const known = pairs[runners.slice(0, 2).join("+")];
     if (known && runners.length === 2) assumptions.push(`Treating this as ${known}; tests are split by feature/scenario, not by class.`);
     else {
@@ -605,6 +635,7 @@ export function analyzeRepo(repoPath) {
   analyzeJava(root, files, profile);
   analyzeDotnet(root, files, profile);
   analyzePython(root, files, profile);
+  analyzeRuby(root, files, profile);
   analyzeNode(root, files, profile);
   analyzeFeatures(root, files, profile);
   analyzeGridAndEnv(root, files, profile);

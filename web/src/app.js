@@ -7,8 +7,12 @@ import * as core from "./core-entry.js";
 import { unzip, zipSync, strToU8 } from "fflate";
 import { icon } from "./icons.js";
 import { highlightYaml } from "./highlight.js";
-import { respond, welcome, help } from "./assistant.js";
+import { respond, welcome, help } from "../../src/assistant.js";
 import { SAMPLES } from "./samples.gen.js";
+import "./kb.gen.js"; // customer-safe knowledge base, embedded at build time
+import { searchKnowledge } from "../../src/knowledge.js";
+
+const REPORT_URL = "https://github.com/roshanLambdatest/HyperMCP/issues/new";
 
 const VERSION = __STUDIO_VERSION__;
 const MAX_FILES = 20000;
@@ -27,8 +31,15 @@ function md(text) {
   const out = [];
   let list = null;
   const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  let code = null;
   for (const raw of String(text).split("\n")) {
     const l = raw.trimEnd();
+    if (/^\s*```/.test(l)) {
+      if (code) { out.push(`<pre class="block scroll">${esc(code.join("\n"))}</pre>`); code = null; }
+      else { close(); code = []; }
+      continue;
+    }
+    if (code) { code.push(raw); continue; }
     const b = l.match(/^\s*[-•]\s+(.*)$/);
     const n = l.match(/^\s*\d+\.\s+(.*)$/);
     if (b || n) {
@@ -39,6 +50,7 @@ function md(text) {
     else { close(); out.push(`<p>${inline(l)}</p>`); }
   }
   close();
+  if (code) out.push(`<pre class="block scroll">${esc(code.join("\n"))}</pre>`);
   return out.join("");
 }
 // wording in the shared core is written for LambdaTest engineers working on a customer's repo; here the visitor IS that customer
@@ -47,7 +59,7 @@ const visitor = (s) => String(s ?? "")
   .replace(/customer-side/gi, "external")
   .replace(/ Pass it as mavenProfile\.$/, " Pick it under Options, or tell me.")
   .replace(/ Pass extraMatrix \{[^}]*\} to spread them over VMs\.$/, " Say \"one project per VM\" to spread them out.");
-import { plural, fwName, stackLine } from "./names.js";
+import { plural, fwName, stackLine } from "../../src/names.js";
 let toastTimer;
 function toast(text) {
   const t = $("#toast");
@@ -93,6 +105,7 @@ document.getElementById("app").innerHTML = `
     <span class="spacer"></span>
     <span class="privacy" id="privacy">${icon.lock}Runs in your browser — code never uploaded</span>
     <button class="btn quiet sm hidden" id="newRepo">${icon.folder}<span>New repo</span></button>
+    <button class="btn quiet icon" id="reportBtn" title="Report a problem" aria-label="Report a problem">${icon.alert}</button>
     <button class="btn quiet icon" id="settingsBtn" title="Settings: LambdaTest account and Claude" aria-label="Settings">${icon.gear}</button>
   </header>
   <main id="view"></main>
@@ -105,6 +118,7 @@ document.getElementById("app").innerHTML = `
 $("#home").onclick = () => landing();
 $("#newRepo").onclick = () => landing();
 $("#settingsBtn").onclick = () => openSettings();
+$("#reportBtn").onclick = () => reportProblem();
 $("#pickFolder").onchange = (e) => fromFileList(e.target.files).finally(() => (e.target.value = ""));
 $("#pickZip").onchange = (e) => e.target.files[0] && fromZip(e.target.files[0]).catch(fail).finally(() => (e.target.value = ""));
 $$("#views button").forEach((b) => (b.onclick = () => setView(b.dataset.v)));
@@ -149,6 +163,8 @@ function landing() {
             <button class="btn primary lg" id="chooseFolder">${icon.folder}Choose repo folder</button>
             <button class="btn lg" id="chooseZip">${icon.zip}Upload .zip</button>
           </div>
+          <div class="gh"><input type="text" id="ghUrl" placeholder="…or paste a public GitHub repo URL" aria-label="GitHub repo URL" spellcheck="false"><button class="btn" id="ghGo">${icon.download}Import</button></div>
+          ${S.pendingSetup ? `<div class="shared">${icon.info}<span>A setup was shared with you${S.pendingSetup.name ? ` for <b>${esc(S.pendingSetup.name)}</b>` : ""}. Load that repo and it's applied.</span></div>` : ""}
           <div class="try">No repo handy? Try a sample: ${Object.keys(SAMPLES).map((k) => `<button class="link" data-sample="${esc(k)}">${esc(SAMPLES[k].label)}</button>`).join(" · ")}</div>
           <ul class="trust">
             <li>${icon.lock}Your code is read in this tab and never uploaded</li>
@@ -179,6 +195,9 @@ function landing() {
   $("#chooseFolder").onclick = () => $("#pickFolder").click();
   $("#chooseZip").onclick = () => $("#pickZip").click();
   $$("[data-sample]").forEach((b) => (b.onclick = () => loadSample(b.dataset.sample).catch(fail)));
+  const gh = () => { const v = $("#ghUrl").value; if (v.trim()) fromGithub(v).catch(fail); };
+  $("#ghGo").onclick = gh;
+  $("#ghUrl").onkeydown = (e) => { if (e.key === "Enter") gh(); };
 }
 const progress = (t) => { const p = $("#progress"); if (p) p.textContent = t; };
 function fail(e) { progress(""); toast(e?.message || String(e)); }
@@ -208,6 +227,7 @@ async function ingest(name, items) {
 }
 
 async function fromFileList(list) {
+  S.source = null;
   const files = [...list];
   if (!files.length) return;
   progress(`Reading ${files.length.toLocaleString()} files…`);
@@ -215,6 +235,7 @@ async function fromFileList(list) {
 }
 
 async function fromZip(file) {
+  S.source = null;
   progress(`Unpacking ${file.name}…`);
   const bytes = new Uint8Array(await file.arrayBuffer());
   const entries = await new Promise((res, rej) => unzip(bytes, { filter: (f) => !f.name.endsWith("/") && !skipPath(f.name) && f.originalSize <= 8 * MAX_TEXT }, (err, out) => (err ? rej(err) : res(out))));
@@ -252,6 +273,7 @@ async function fromDrop(dt) {
 }
 
 async function loadSample(key) {
+  S.source = null;
   const s = SAMPLES[key];
   await ingest(key, Object.entries(s.files).map(([rel, text]) => ({ rel, size: text.length, read: async () => text })));
 }
@@ -261,11 +283,19 @@ function analyze() {
   S.profile = core.analyzeRepo(ROOT);
   S.summary = core.summarizeProfile(S.profile, 40);
   S.scan = core.scanRepo(ROOT);
-  Object.assign(S, { options: {}, history: [], chat: [], opt: null, diag: null, logs: "", capsResult: null, tab: "checks", view: "chat" });
+  Object.assign(S, { options: {}, history: [], chat: [], opt: null, diag: null, logs: "", capsResult: null, tab: "checks", view: "chat", fileName: null });
   regenerate();
   workspace();
   const w = welcome(context());
+  const existing = (S.profile.existingHyperExecuteYamls || []).slice(0, 3);
+  if (existing.length) {
+    w.reply += `\n\nYour repo already has ${existing.map((f) => `\`${f}\``).join(", ")}. I can check and optimize that instead of starting fresh.`;
+    w.chips.unshift(...existing.map((f) => ({ label: `Check my ${f.split("/").pop()}`, primary: true, run: () => loadExisting(f) })));
+  }
+  const usual = S.result && !S.pendingSetup ? loadUsual(S.result.framework) : null;
+  if (usual && Object.keys(usual).length) w.chips.unshift({ label: `Use my usual: ${describeOptions(usual) || "settings"}`, primary: true, run: () => { const r = applyOptions(usual); renderAll(); say("bot", r.error ? `Your usual settings don't fit this repo: ${r.error}` : `Applied your usual settings. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }] }); } });
   say("bot", w.reply, { chips: w.chips });
+  applyPendingSetup();
 }
 
 const credsOn = () => !!(S.lt.embed && S.lt.user.trim() && S.lt.key.trim());
@@ -287,7 +317,7 @@ function validate() {
   try { S.parsed = core.YAML.parse(S.yaml.replace(/\$\{\{[^}]*\}\}/g, "x")) || {}; } catch { S.parsed = {}; }
 }
 function context() {
-  return { core, profile: S.profile, summary: S.summary, result: S.result, yaml: S.yaml, validation: S.validation, parsed: S.parsed, scan: S.scan, repoName: S.repoName, credsOn: credsOn(), visitor };
+  return { core, profile: S.profile, summary: S.summary, result: S.result, yaml: S.yaml, validation: S.validation, parsed: S.parsed, scan: S.scan, repoName: S.repoName, credsOn: credsOn(), visitor, searchKb: (q) => searchKnowledge(q, 3) };
 }
 // generator notes speak to the VS Code / MCP flow; replace the account note with the web one
 function notes() {
@@ -318,6 +348,7 @@ function applyOptions(patch) {
     undo(true);
     return { error: err };
   }
+  saveUsual();
   return { hadEdits };
 }
 function undo(silent) {
@@ -328,6 +359,34 @@ function undo(silent) {
   validate();
   if (!silent) renderAll();
   return true;
+}
+
+// the repo's own HyperExecute YAML: validate and optimize it instead of generating a new one
+function loadExisting(rel) {
+  const text = core.vfsRead(`${ROOT}/${rel}`);
+  if (!text) return say("bot", `I couldn't read \`${rel}\`.`, { error: true });
+  snapshot();
+  Object.assign(S, { yaml: text, dirty: true, fileName: rel.split("/").pop(), opt: null });
+  validate();
+  renderAll();
+  const o = runOptimizer();
+  const v = S.validation;
+  const lines = [`Loaded **${rel}**. ${v.errors.length ? `It has **${plural(v.errors.length, "problem")}**:\n${v.errors.slice(0, 5).map((e) => `- ${visitor(e)}`).join("\n")}` : v.warnings.length ? `It's valid, with ${plural(v.warnings.length, "warning")} under Checks.` : "It's valid against HyperExecute's rules."}`];
+  if (o.suggestions?.length) lines.push(`I also see ${plural(o.suggestions.length, "way")} to make it faster or cheaper.`);
+  say("bot", lines.join("\n\n"), { chips: [o.suggestions?.length ? { label: "Optimize it", send: "Optimize it", primary: true } : null, { label: "Explain this YAML", send: "Explain this YAML" }, { label: "Use a freshly generated YAML", run: () => { undo(); say("bot", "Back to the YAML I generated from your repo."); } }].filter(Boolean) });
+}
+
+// a CI file that runs the YAML on every push
+function pipelineInChat(ci) {
+  if (ci === "ask") return say("bot", "Which CI do you use? I'll write the pipeline file that downloads the HyperExecute CLI and runs this YAML.", { chips: Object.entries(core.CI_SYSTEMS).map(([id, s]) => ({ label: s.name, run: () => pipelineInChat(id) })) });
+  const p = core.generatePipeline({ ci, yaml: S.yaml });
+  say("bot", `Here's **${p.path}** for ${p.name}. It downloads the CLI, runs this YAML with your LambdaTest account from the CI's secrets, fails the build when the job fails, and keeps the job logs.\n\n${p.notes.map((n) => `- ${n}`).join("\n")}`, {
+    chips: [
+      { label: `Download ${p.path.split("/").pop()}`, primary: true, icon: "download", run: () => download(p.path.split("/").pop(), p.content) },
+      { label: "Copy", icon: "copy", run: () => copy(p.content, "Pipeline copied") },
+      { label: "Preview in Run tab", run: () => { S.ci = ci; openTab("run"); } },
+    ],
+  });
 }
 
 // ---------- chat ----------
@@ -356,6 +415,7 @@ async function act(plan, text) {
   if (plan.undo) return say("bot", undo() ? "Undone. The YAML is back to how it was." : "There's nothing to undo.");
   if (plan.reset) { snapshot(); S.options = {}; regenerate(); renderAll(); return say("bot", "Back to the detected defaults.", { chips: [{ label: "Undo", send: "undo", icon: "undo" }] }); }
   if (plan.optimize) return optimizeInChat();
+  if (plan.pipeline) return pipelineInChat(plan.pipeline);
   if (plan.options) return changeInChat(plan.options, plan.done || [], plan.reply);
   if (plan.yaml) {
     snapshot();
@@ -502,9 +562,10 @@ function workspace() {
         <div class="optbar" id="optbar"></div>
         <div class="editor-card">
           <div class="ed-h">
-            <span class="fname">hyperexecute.yaml</span><span class="ver" id="ver"></span><span class="edited" id="edited"></span>
+            <span class="fname" id="fname">hyperexecute.yaml</span><span class="ver" id="ver"></span><span class="edited" id="edited"></span>
             <span class="spacer"></span>
             <button class="status" id="statusPill"></button>
+            <button class="btn sm quiet" id="shareBtn" title="Copy a link with these settings (never your code)">${icon.share}Share</button>
             <button class="btn sm" id="copyBtn">${icon.copy}Copy</button>
             <button class="btn sm primary" id="dlBtn">${icon.download}Download</button>
           </div>
@@ -524,7 +585,8 @@ function workspace() {
   $("#aiChip").onclick = () => openSettings();
   $("#helpLink").onclick = () => { const h = help(); say("bot", h.reply, { chips: h.chips }); };
   $("#copyBtn").onclick = () => copy(S.yaml, "YAML copied");
-  $("#dlBtn").onclick = () => download("hyperexecute.yaml", S.yaml, "text/yaml");
+  $("#shareBtn").onclick = () => copy(shareLink(), S.source ? "Link copied — it opens this repo with these settings" : "Link copied — the other person loads the same repo and gets these settings");
+  $("#dlBtn").onclick = () => download(S.fileName || "hyperexecute.yaml", S.yaml, "text/yaml");
   $("#statusPill").onclick = () => { openTab("checks"); if (window.innerWidth <= 960) setView("checks"); };
   const input = $("#input");
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); const v = input.value; input.value = ""; autosize(); send(v); } });
@@ -564,6 +626,7 @@ function paintEditor(setValue) {
   $("#hl").scrollTop = ta.scrollTop;
 }
 function renderMeta() {
+  $("#fname").textContent = S.fileName || "hyperexecute.yaml";
   $("#ver").textContent = S.result ? `v${S.result.yamlVersion} · ${fwName(S.result.framework)}` : "";
   $("#edited").textContent = S.dirty ? "Edited" : "";
   const v = S.validation;
@@ -653,6 +716,7 @@ function renderChecks(el) {
 }
 
 function renderRun(el) {
+  const pipe = core.generatePipeline({ ci: S.ci || "github", yaml: S.yaml });
   const r = S.result || {};
   const d = S.parsed || {};
   const cmd = d.testDiscovery?.command;
@@ -673,12 +737,21 @@ function renderRun(el) {
         <div class="row mt"><select id="runOs" aria-label="Your operating system">${[["mac", "macOS"], ["linux", "Linux"], ["win", "Windows"]].map(([v, l]) => `<option value="${v}" ${v === os ? "selected" : ""}>${l}</option>`).join("")}</select>
         <a class="btn sm primary" href="${esc(core.cliDownloadUrl(os))}" rel="noopener">${icon.download}Download CLI</a></div>
         <pre class="block">${esc(run)}</pre><button class="btn sm" id="cpRun">${icon.copy}Copy commands</button></div></li>
+      <li><div><b>Or run it from your CI</b><span class="muted">A pipeline file that runs this YAML on every push, with your account taken from the CI's secrets.</span>
+        <div class="row mt"><select id="ciSel" aria-label="CI system">${Object.entries(core.CI_SYSTEMS).map(([id, s]) => `<option value="${id}" ${id === (S.ci || "github") ? "selected" : ""}>${s.name}</option>`).join("")}</select>
+        <button class="btn sm primary" id="ciDl">${icon.download}Download</button><button class="btn sm" id="ciCp">${icon.copy}Copy</button></div>
+        <details class="mt"><summary class="small muted">${esc(pipe.path)}</summary><pre class="block scroll">${esc(pipe.content)}</pre></details>
+        <div class="small muted">${pipe.notes.map(esc).join(" ")}</div></div></li>
       <li><div><b>If the job fails</b><span class="muted">Paste its log into the chat (or the Diagnose tab) to get the cause and a corrected YAML.</span></div></li>
     </ol>`;
   $("#runDl").onclick = () => download("hyperexecute.yaml", S.yaml, "text/yaml");
   if ($("#cpDisc")) $("#cpDisc").onclick = () => copy(cmd, "Command copied");
   $("#cpRun").onclick = () => copy(run, "Commands copied");
   $("#runOs").onchange = (e) => { S.runOs = e.target.value; renderRun(el); };
+  $("#ciSel").onchange = (e) => { S.ci = e.target.value; renderRun(el); };
+  $("#ciDl").onclick = () => download(pipe.path.split("/").pop(), pipe.content);
+  $("#ciCp").onclick = () => copy(pipe.content, "Pipeline copied");
+  $("#ciSel").style.width = "auto";
   $("#runOs").style.width = "auto";
 }
 
@@ -843,6 +916,95 @@ async function loadCaps(refreshLists) {
   if (S.tab === "grid") renderGrid($("#panel"));
 }
 
+// ---------- report a problem (prepared GitHub issue; the visitor reviews it before anything is sent) ----------
+function reportProblem() {
+  const v = S.validation;
+  const masked = (S.yaml || "").replace(/^(\s*LT_(?:USERNAME|ACCESS_KEY):\s*)(?!\$\{\{).+$/gm, "$1<masked>").replace(/^(\s*\w*(?:KEY|TOKEN|SECRET|PASSWORD)\w*:\s*)(?!\$\{\{|<set ).+$/gim, "$1<masked>");
+  const body = [
+    "**What happened**", "<!-- Describe what you expected and what you got. -->", "",
+    "**Setup**",
+    `- Studio web v${VERSION}`,
+    S.profile ? `- Stack: ${stackLine(S.summary, S.result?.framework)}` : "- No repo loaded",
+    S.result ? `- YAML v${S.result.yamlVersion}, options: \`${JSON.stringify(S.options)}\`` : "",
+    v?.errors?.length ? `- Checks failing: ${v.errors.slice(0, 5).join(" | ")}` : "",
+    "",
+    S.yaml ? "<details><summary>YAML (credentials masked — review before submitting)</summary>\n\n```yaml\n" + masked.slice(0, 5000) + "\n```\n</details>" : "",
+  ].filter((l) => l !== "").join("\n");
+  const url = `${REPORT_URL}?title=${encodeURIComponent(`[web] ${S.result ? fwName(S.result.framework) + ": " : ""}`)}&body=${encodeURIComponent(body).slice(0, 7000)}`;
+  window.open(url, "_blank", "noopener");
+  toast("Opened a prepared GitHub issue — nothing is sent until you submit it");
+}
+
+// ---------- share a setup (options only, never code) ----------
+function shareLink() {
+  const setup = { v: 1, name: S.repoName, repo: S.source || null, options: S.options };
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(setup)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${location.origin}${location.pathname}#setup=${b64}`;
+}
+function readSharedSetup() {
+  const m = location.hash.match(/#setup=([\w-]+)/);
+  if (!m) return null;
+  try { return JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, "+").replace(/_/g, "/"))))); } catch { return null; }
+}
+function applyPendingSetup() {
+  const p = S.pendingSetup;
+  if (!p) return;
+  S.pendingSetup = null;
+  history.replaceState(null, "", location.pathname);
+  const r = applyOptions(p.options || {});
+  renderAll();
+  say("bot", r.error ? `The shared setup doesn't fit this repo: ${r.error}` : `Applied the shared setup${p.name ? ` for **${p.name}**` : ""}. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }] });
+}
+
+// ---------- usual settings, remembered in this browser per framework ----------
+const USUAL = ["runson", "concurrency", "splitBy", "retryOnFailure", "maxRetries", "globalTimeout", "tunnel"]; // same as src/learning.js
+function saveUsual() {
+  if (!S.result) return;
+  const o = Object.fromEntries(Object.entries(S.options).filter(([k]) => USUAL.includes(k)));
+  try { if (Object.keys(o).length) localStorage.setItem(`he-usual:${S.result.framework}`, JSON.stringify(o)); } catch {}
+}
+function loadUsual(framework) {
+  try { return JSON.parse(localStorage.getItem(`he-usual:${framework}`) || "null"); } catch { return null; }
+}
+const describeOptions = (o) => [o.runson && (OS_NAME[o.runson] || o.runson), o.concurrency && plural(o.concurrency, "VM"), o.splitBy && `split by ${o.splitBy}`, o.tunnel && "tunnel", o.maxRetries && plural(o.maxRetries, "retry"), o.globalTimeout && `${o.globalTimeout} min`].filter(Boolean).join(" · ");
+
+// ---------- import a public GitHub repo (read straight from GitHub into this tab) ----------
+function parseGithub(input) {
+  const m = String(input).trim().match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/tree\/([^?#]+))?\/?(?:[?#].*)?$/) || String(input).trim().match(/^([\w.-]+)\/([\w.-]+)$/);
+  return m ? { owner: m[1], repo: m[2], ref: m[3] || null } : null;
+}
+async function fromGithub(input) {
+  const g = parseGithub(input);
+  if (!g) throw new Error("Paste a GitHub repo URL, like https://github.com/owner/repo");
+  progress(`Looking up ${g.owner}/${g.repo}…`);
+  const api = (p) => fetch(`https://api.github.com/repos/${g.owner}/${g.repo}${p}`, { headers: { Accept: "application/vnd.github+json" } });
+  let ref = g.ref;
+  if (!ref) {
+    const r = await api("");
+    if (r.status === 404) throw new Error("Repo not found, or it's private. Private repos: download them as .zip and upload that.");
+    if (r.status === 403) throw new Error("GitHub's hourly limit for anonymous requests was reached. Try again later, or upload a .zip.");
+    ref = (await r.json()).default_branch;
+  }
+  const t = await api(`/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+  if (!t.ok) throw new Error(t.status === 403 ? "GitHub's hourly limit for anonymous requests was reached. Try again later, or upload a .zip." : `Couldn't read the repo's files (GitHub ${t.status}).`);
+  const tree = await t.json();
+  const blobs = tree.tree.filter((e) => e.type === "blob" && !skipPath(e.path));
+  const wanted = blobs.filter((b) => b.size <= MAX_TEXT && !BINARY.test(b.path)).slice(0, 2500);
+  const texts = new Map();
+  let done = 0;
+  const queue = [...wanted];
+  const worker = async () => {
+    for (let b; (b = queue.shift()); ) {
+      const r = await fetch(`https://raw.githubusercontent.com/${g.owner}/${g.repo}/${encodeURIComponent(ref)}/${b.path.split("/").map(encodeURIComponent).join("/")}`);
+      if (r.ok) texts.set(b.path, await r.text());
+      if (++done % 25 === 0) progress(`Reading ${done} of ${wanted.length} files from GitHub…`);
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  S.source = `https://github.com/${g.owner}/${g.repo}${g.ref ? `/tree/${g.ref}` : ""}`;
+  await ingest(g.repo, blobs.map((b) => ({ rel: b.path, size: b.size, read: async () => texts.get(b.path) || "" })));
+}
+
 // ---------- settings: LambdaTest account + optional Claude ----------
 function openSettings() {
   const d = $("#settings");
@@ -900,4 +1062,6 @@ function openSettings() {
   d.showModal();
 }
 
+S.pendingSetup = readSharedSetup();
 landing();
+if (S.pendingSetup?.repo && parseGithub(S.pendingSetup.repo)) fromGithub(S.pendingSetup.repo).catch(fail);

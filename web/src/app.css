@@ -102,6 +102,11 @@ select { padding-right: 26px; appearance: none; background-image: linear-gradien
 .hero h1 mark { background: linear-gradient(transparent 62%, var(--brand-soft) 62%); color: inherit; padding: 0 2px; }
 .hero .lead { font-size: 17.5px; line-height: 1.6; color: var(--ink-2); margin: 0 0 30px; max-width: 540px; }
 .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.gh { display: flex; gap: 8px; max-width: 520px; margin: 0 0 14px; }
+.gh input { height: 40px; border-radius: 10px; }
+.gh .btn { height: 40px; }
+.shared { display: flex; gap: 8px; align-items: flex-start; max-width: 520px; padding: 10px 12px; margin: 0 0 14px; border-radius: 10px; background: var(--brand-soft); color: var(--ink); font-size: 13.5px; }
+.shared .i { color: var(--brand); margin-top: 2px; }
 .try { font-size: 13.5px; color: var(--ink-2); margin-bottom: 30px; }
 .trust { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
 .trust li { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2); }
@@ -278,6 +283,9 @@ dialog::backdrop { background: rgba(12, 12, 14, 0.45); }
   .views { display: inline-flex; }
   .top { gap: 10px; padding: 0 12px; }
   .top .brand span, .top .privacy { display: none; }
+  #newRepo span { display: none; }
+  #newRepo { width: 34px; padding: 0; }
+  .top { gap: 6px; }
   .ws[data-view="chat"] .work, .ws[data-view="yaml"] .chat, .ws[data-view="checks"] .chat { display: none; }
   .ws { grid-template-columns: minmax(0, 1fr); }
   .ws[data-view="yaml"] .work { grid-template-rows: auto minmax(0, 1fr); }

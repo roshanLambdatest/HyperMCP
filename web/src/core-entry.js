@@ -9,5 +9,6 @@ export { scanRepo, scanCredentials, planCredentialFixes } from "../../src/securi
 export { capabilityOptions, generateConnection, findDriverSetup } from "../../src/capabilities.js";
 export { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis } from "../../src/doctor.js";
 export { cliDownloadUrl } from "./cli-url.js";
+export { generatePipeline, CI_SYSTEMS } from "../../src/pipelines.js";
 export { vfsReset, vfsAdd, vfsFiles, vfsRead } from "./shims/fs.js";
 export { default as YAML } from "yaml";

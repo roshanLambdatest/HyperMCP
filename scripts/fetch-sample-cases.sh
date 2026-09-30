@@ -36,6 +36,10 @@ cypress-v9-autosplit hyperexecute-cypress-v9-sample yaml/linux/.hyperexecute_aut
 java-playwright-junit-autosplit hyperexecute-java-playwright-sample yaml/linux/junit_hyperexecute_autosplit_sample.yaml - -
 playwright-python-autosplit hyperexecute-playwright-python-sample yaml/linux/.hyperexecute_autosplits.yaml - -
 gradle-testng hyperexecute-selenium-gradle-testng-sample hyperexecute-linux.yaml - -
+ruby-rspec-autosplit Ruby-HyperExecute-Sample yaml/linux/ruby_hyperexecute_autosplit_sample.yaml - -
+capybara-cucumber-autosplit Capybara-HyperExecute-Sample yaml/linux/.hyperexecute_autosplit.yaml - -
 spock hyperexecute-spock-sample hyperexecute.yaml discovered_count The_sample_repeats_one_Gradle_task_per_VM.
 CASES
+# the RSpec sample splits by example (file:line), so generate the same way
+sed -i.bak "s/\"repo\":/\"options\": { \"splitBy\": \"method\" }, \"repo\":/" "$DIR/ruby-rspec-autosplit/case.json" && rm -f "$DIR/ruby-rspec-autosplit/case.json.bak"
 echo "Cases in $DIR. Run: HE_ACCURACY_CASES=$DIR npm run accuracy"

@@ -2,7 +2,7 @@
   "name": "hyperexecute-yaml-studio",
   "displayName": "HyperExecute Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {

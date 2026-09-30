@@ -132,6 +132,8 @@ export function respond(text, ctx) {
   if (/^(undo|revert|go back)\b/.test(low)) return { undo: true };
   if (/^(reset|start over|defaults?)\b/.test(low)) return { reset: true };
   if (/\b(optimi[sz]e|faster|cheaper|speed ?up|save (time|money|cost))\b/.test(low)) return { optimize: true };
+  const ci = /github\s*actions?|\bgithub\b.*\b(ci|workflow|pipeline)/.test(low) ? "github" : /\bgitlab\b/.test(low) ? "gitlab" : /\bjenkins(file)?\b/.test(low) ? "jenkins" : /\bazure\b/.test(low) ? "azure" : null;
+  if (ci || /\b(ci|pipeline|workflow)\b.*\b(file|yaml|yml|set ?up|run|every push)|\brun (it |this )?(from|in|on) (my )?ci\b|\b(ci|pipeline)\b\s*\??$/.test(low)) return { pipeline: ci || "ask" };
   if (/\b(explain|walk me through|what does (this|the|my) yaml|describe (this|the|my) yaml)\b/.test(low)) return { reply: explainYaml(ctx), chips: [{ label: "Is it valid?", send: "Is it valid?" }, { label: "How do I run it?", send: "How do I run it?" }] };
   if (/\b(valid|errors?|wrong|issues?|problems?|warnings?)\b/.test(low) && ask(t)) {
     const v = ctx.validation;
@@ -161,13 +163,22 @@ export function respond(text, ctx) {
   if (Object.keys(options).length) return { options, done };
 
   if (ask(t)) for (const [re, fn] of FAQ) if (re.test(low)) return { reply: fn(ctx) };
+  // anything else that reads like a question: the best matching section of the HyperExecute notes
+  if (ctx.searchKb && (ask(t) || t.split(/\s+/).length >= 3)) {
+    const hit = ctx.searchKb(t).find((h) => h.matchedTerms >= 2 && h.text.length > 80);
+    if (hit) {
+      const body = hit.text.replace(/^#+\s.*\n+/, "").split("\n").filter((l) => !/^Source:/.test(l)).join("\n").trim();
+      const excerpt = body.length > 900 ? body.slice(0, body.lastIndexOf("\n", 900) > 300 ? body.lastIndexOf("\n", 900) : 900) + "\n…" : body;
+      return { reply: `From the HyperExecute notes, **${hit.section}**:\n\n${excerpt}`, ai: true, kb: true };
+    }
+  }
   if (/\bfail\s*fast\b/.test(low)) return { ai: true, reply: "Fail-fast isn't one of the generator options. Add HyperExecute's `failFast` key to the YAML by hand; the checks below validate it as you type." };
   return { ai: true, reply: "I didn't catch that. I can change the setup (\"Windows 11, 10 VMs, split by method\"), explain the YAML, check it, optimize it, or diagnose a failed run if you paste its log.", chips: help().chips };
 }
 
 export function help() {
   return {
-    reply: "Here's what I can do:\n- **Change the setup**: \"run on Windows 11 with 10 VMs\", \"split by scenario\", \"add a tunnel\", \"Chrome and Firefox\", \"only @smoke and @regression\", \"2 retries\", \"BASE_URL=https://staging.example.com\"\n- **Explain** the YAML, or tell you whether it's **valid**\n- **Optimize** it for speed and cost\n- **Diagnose** a failed run: paste the job log\n- **Undo** the last change",
+    reply: "Here's what I can do:\n- **Change the setup**: \"run on Windows 11 with 10 VMs\", \"split by scenario\", \"add a tunnel\", \"Chrome and Firefox\", \"only @smoke and @regression\", \"2 retries\", \"BASE_URL=https://staging.example.com\"\n- **Explain** the YAML, or tell you whether it's **valid**\n- **Optimize** it for speed and cost\n- **Diagnose** a failed run: paste the job log\n- **Run it from CI**: \"GitHub Actions\", \"GitLab\", \"Jenkins\" or \"Azure DevOps\"\n- **Undo** the last change",
     chips: [{ label: "Explain this YAML", send: "Explain this YAML" }, { label: "Optimize it", send: "Optimize it" }, { label: "Windows 11 with 10 VMs", send: "Run on Windows 11 with 10 VMs" }],
   };
 }

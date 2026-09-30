@@ -57,7 +57,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   }).listen(0);
   const url = `http://127.0.0.1:${server.address().port}/`;
 
-  const browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ["--no-sandbox"] });
+  const browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ["--no-sandbox"], protocolTimeout: 120000 });
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 900 });
   const errors = [];
@@ -150,6 +150,19 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   check("chat: unknown request → helpful fallback + Claude hint", /didn't catch that/.test(r) && /Claude/.test(r), r);
   if (shots) await page.screenshot({ path: path.join(shots, "2-workspace.png") });
 
+  // ---------- CI pipeline, knowledge base, lazy Claude ----------
+  r = await ask("Set it up in GitHub Actions");
+  check("chat: GitHub Actions pipeline", /\.github\/workflows\/hyperexecute\.yml/.test(r) && /Download hyperexecute\.yml/.test(r) && /secrets/i.test(r), r);
+  r = await ask("pipeline");
+  check("chat: 'pipeline' asks which CI", /Which CI/.test(r) && /Jenkins/.test(r), r);
+  r = await ask("tests pass locally but fail on hyperexecute, why?");
+  check("chat: answers from the knowledge base", /From the HyperExecute notes/.test(r), r);
+  const kbSrc = fs.readFileSync(path.join(here, "..", "src", "kb.gen.js"), "utf8");
+  check("knowledge base shipped to customers has no internal material", !/Pre-sales|Confluence|\bHYP\b/.test(kbSrc) && /Mandatory keys/.test(kbSrc));
+  check("Claude's code is not downloaded until Claude is turned on", !requests.some((u) => /chunks\/claude-/.test(u)), requests.filter((u) => u.includes("chunks")).join("\n"));
+  const runText = await tab("run");
+  check("run tab: CI section with pipeline preview", /Or run it from your CI/.test(runText) && (await page.$("#ciSel")) !== null, runText.slice(0, 300));
+
   // ---------- Claude (optional, visitor's own key) ----------
   await page.click("#settingsBtn");
   await page.type("#aiKey", "sk-ant-test-key");
@@ -164,6 +177,37 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   check("claude: model, fallbacks, JSON-schema output", req && req.body.model === "claude-opus-5-5" && req.body.fallbacks === "default" && req.body.output_config?.format?.type === "json_schema" && req.body.output_config.effort === "low", JSON.stringify(req?.body)?.slice(0, 600));
   check("claude: no source files sent (summary + YAML only)", req && !JSON.stringify(req.body).includes("public class LoginTest"), "source leaked");
   check("claude: its plan is applied (7 VMs) and labelled", /concurrency: 7/.test(await yaml()) && /via Claude/.test(r), r);
+  check("claude: its code loads only now, as a separate file", requests.some((u) => /chunks\/claude-/.test(u)));
+
+  // ---------- usual settings, existing YAML, report ----------
+  await load("maven-testng");
+  let w2 = await lastBot();
+  check("usual settings offered for a framework used before", /Use my usual/.test(w2), w2);
+  {
+    const files = {};
+    (function walk(dir, rel) { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const r2 = rel ? `${rel}/${e.name}` : e.name; if (e.isDirectory()) walk(path.join(dir, e.name), r2); else files[`shop/${r2}`] = fs.readFileSync(path.join(dir, e.name)); } })(path.join(fixtures, "maven-testng"), "");
+    files["shop/hyperexecute.yaml"] = Buffer.from("version: 0.1\nrunson: ubuntu\nautosplit: true\nconcurrency: 4\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test\n");
+    const z = path.join(os.tmpdir(), "he-web-existing.zip");
+    fs.writeFileSync(z, zipSync(files));
+    await page.click("#newRepo"); await page.waitForSelector("#pickZip");
+    await (await page.$("#pickZip")).uploadFile(z);
+    await page.waitForSelector("#yaml");
+    await page.waitForFunction(() => document.querySelectorAll("#msgs .msg.bot").length >= 1);
+    w2 = await lastBot();
+    check("existing YAML offered", /already has/.test(w2) && /Check my hyperexecute\.yaml/.test(w2), w2);
+    await page.evaluate(() => [...document.querySelectorAll("#msgs .chip")].find((c) => c.textContent.includes("Check my")).click());
+    await wait(300);
+    r = await lastBot();
+    check("existing YAML loaded and checked", /Loaded \*?\*?hyperexecute\.yaml|Loaded hyperexecute\.yaml/.test(r) && /problem/.test(r) && (await yaml()).includes("runson: ubuntu"), r);
+  }
+  const popup = new Promise((res) => browser.once("targetcreated", res));
+  await page.click("#reportBtn");
+  const target = await Promise.race([popup, wait(5000).then(() => null)]);
+  const popUrl = target ? target.url() : "";
+  // close the GitHub tab and give focus back to the app
+  try { const pg = target && (await target.page()); if (pg) await pg.close(); } catch {}
+  await page.bringToFront();
+  check("report: opens a prepared GitHub issue (credentials masked)", /github\.com\/roshanLambdatest\/HyperMCP\/issues\/new\?title=/.test(decodeURIComponent(popUrl)) && !/test-key|LTkey/.test(decodeURIComponent(popUrl)), popUrl.slice(0, 200));
 
   // ---------- drawer tabs ----------
   await load("maven-testng");
@@ -192,6 +236,23 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   await page.waitForSelector("#yaml");
   check("sample repo loads (Playwright)", /npx playwright test/.test(await yaml()) && /web-e2e/.test(await lastBot()));
 
+  // ---------- shared setup link that imports a public GitHub repo ----------
+  {
+    const setup = { v: 1, name: "junit-selenium-hyperexecute-sample", repo: "https://github.com/LambdaTest/junit-selenium-hyperexecute-sample", options: { concurrency: 7 } };
+    const b64 = Buffer.from(JSON.stringify(setup)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    await page.goto("about:blank"); // a hash-only change wouldn't reload the page
+    await page.goto(url + "#setup=" + b64, { waitUntil: "domcontentloaded" });
+    try {
+      await page.waitForFunction(() => document.querySelector("#yaml")?.value.includes("concurrency: 7"), { timeout: 60000 });
+      const y2 = await yaml();
+      check("share link: imports the public GitHub repo and applies the shared settings", /junit/i.test(y2) && /concurrency: 7/.test(y2) && /Applied the shared setup/.test(await lastBot()), y2.slice(0, 400));
+    } catch (e) {
+      const why = await page.$eval("#toast", (t) => t.textContent).catch(() => "");
+      if (/hourly limit/.test(why)) console.log("SKIP  share link: GitHub's anonymous rate limit reached on this machine");
+      else check("share link: imports the public GitHub repo and applies the shared settings", false, (await page.$eval("#progress", (p) => p.textContent).catch(() => "")) + " " + e.message + " " + why);
+    }
+  }
+
   // ---------- phone ----------
   await page.setViewport({ width: 390, height: 844 });
   await wait(300);
@@ -208,7 +269,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   check("phone: landing fits", overflow <= 1, `${overflow}px`);
 
   const external = requests.filter((u) => !u.startsWith(url));
-  check("network: only LambdaTest and (opt-in) Anthropic", external.every((u) => /^https:\/\/api\.(lambdatest|anthropic)\.com\//.test(u)), external.join("\n"));
+  check("network: only LambdaTest, GitHub (import) and opt-in Anthropic", external.every((u) => /^https:\/\/(api\.(lambdatest|anthropic|github)\.com|raw\.githubusercontent\.com)\//.test(u)), external.join("\n"));
   check("no page errors or CSP violations", !errors.length, errors.join("\n"));
 
   await browser.close();

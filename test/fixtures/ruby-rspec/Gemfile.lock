@@ -1,0 +1,10 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rspec (3.13.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rspec

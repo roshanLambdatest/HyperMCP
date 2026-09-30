@@ -15,3 +15,4 @@ vscode-extension/.build/
 web/dist/
 web/test/shots/
 web/src/samples.gen.js
+web/src/kb.gen.js

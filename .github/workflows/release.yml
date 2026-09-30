@@ -13,15 +13,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: |
             package-lock.json
             vscode-extension/package-lock.json
+            web/package-lock.json
 
       - name: Test MCP core
         run: npm ci && npm test
@@ -38,19 +39,29 @@ jobs:
         working-directory: vscode-extension
         run: npm ci && npm run package
 
+      - name: Build and test the web version
+        working-directory: web
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: |
+          npm ci && npm run build && node test/e2e.js
+          (cd dist && zip -qr ../hyperexecute-studio-web.zip .)
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" vscode-extension/hyperexecute-studio.vsix \
+          gh release create "$GITHUB_REF_NAME" vscode-extension/hyperexecute-studio.vsix web/hyperexecute-studio-web.zip \
             --title "HyperExecute Studio $GITHUB_REF_NAME" \
-            --notes "Install: download hyperexecute-studio.vsix below → VS Code Extensions view → ⋯ → Install from VSIX… → then run Developer: Reload Window." \
+            --notes "VS Code: download hyperexecute-studio.vsix below → Extensions view → ⋯ → Install from VSIX… → Developer: Reload Window. Web: unzip hyperexecute-studio-web.zip onto any static host (or drag it onto Netlify)." \
             --generate-notes
 
       - name: Upload build artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hyperexecute-studio
-          path: vscode-extension/hyperexecute-studio.vsix
+          path: |
+            vscode-extension/hyperexecute-studio.vsix
+            web/hyperexecute-studio-web.zip

@@ -4,7 +4,7 @@
   publish = "dist"
 
 [build.environment]
-  NODE_VERSION = "20"
+  NODE_VERSION = "22"
 
 # Security headers on every page. The Content-Security-Policy itself is in index.html; frame-ancestors
 # can only be set as a header, so it lives here: the page can't be embedded in another site.

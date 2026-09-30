@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -430,7 +430,9 @@ class Studio {
       this.state.profile = c.summarizeProfile(this.state.profileFull, 25);
       this.state.scan = c.scanRepo(repoPath);
       this.state.discoveredUnits = null;
-      this.state.options = this.context.workspaceState.get(this.optionsKey(), {});
+      // this repo's own saved options win; a repo seen for the first time starts from the user's usual settings
+      const saved = this.context.workspaceState.get(this.optionsKey());
+      this.state.options = saved || c.learnedOptions(this.state.profileFull);
       this.state.dirty = false;
       const out = path.join(repoPath, this.outputName());
       this.state.existingFile = fs.existsSync(out) ? this.outputName() : null;
@@ -479,6 +481,8 @@ class Studio {
     const c = await loadCore();
     this.state.chat.push({ role: "user", text });
     this.push();
+    // No AI backend: the shared built-in assistant (same as the web version) handles the request.
+    if ((await ai.detectBackend(this.context)).name === "rules") return this.builtInChat(c, text);
     this.busy("Thinking…");
     this.cts = new vscode.CancellationTokenSource();
     try {
@@ -592,6 +596,7 @@ class Studio {
 
   async save(openAfter) {
     if (!this.state.repo) return;
+    core?.recordChoice?.(this.state.profileFull, this.state.options);
     const target = vscode.Uri.file(path.join(this.state.repo, this.outputName()));
     if (fs.existsSync(target.fsPath) && fs.readFileSync(target.fsPath, "utf8") !== this.state.yaml && !this.state.overwriteOk) {
       const a = await vscode.window.showWarningMessage(`${this.outputName()} already exists in the repo. Overwrite it?`, { modal: true }, "Overwrite", "Show diff");
@@ -831,9 +836,71 @@ class Studio {
         return this.push();
       }
       await this.applyRunFixes(null, true);
-    } else if (["passed", "passed-with-failures"].includes(run.status)) {
+    }
+    if (run.status === "passed" && !run.targeted) run.savedCase = !!c.saveSuccessCase({ repo: this.state.repo, yamlText, profile: this.state.profileFull, jobId: d.jobId });
+    if (["passed", "passed-with-failures"].includes(run.status)) {
       vscode.window.showInformationMessage(`HyperExecute job ${run.status === "passed" ? "passed" : "finished with test failures"} (attempt ${run.attempt}).`);
     }
+  }
+
+  // The built-in assistant (src/assistant.js): option changes, questions, pasted-log diagnosis,
+  // optimize and CI pipelines, without any AI model.
+  async builtInChat(c, text) {
+    const reply = (t, applied = "") => { this.state.chat.push({ role: "assistant", text: t, applied, backend: "Built-in assistant" }); this.push(); };
+    const YAML = c.YAML || (await import(pathToFileURL(require.resolve("yaml")).href)).default;
+    let parsed = {};
+    try { parsed = YAML.parse(String(this.state.yaml || "").replace(/\$\{\{[^}]*\}\}/g, "x")) || {}; } catch {}
+    if (/^(apply|use)\b.*\b(fix|fixed|corrected)\b/i.test(text.trim()) && this.pendingFix) {
+      Object.assign(this.state, { yaml: this.pendingFix, dirty: true });
+      this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
+      this.pendingFix = null;
+      return reply("Done: the corrected YAML is in the editor. Save it and run again.", "YAML edited directly.");
+    }
+    const ctx = { core: c, profile: this.state.profileFull, summary: c.summarizeProfile(this.state.profileFull, 40), result: this.state.result, yaml: this.state.yaml, validation: this.state.validation, parsed, scan: this.state.scan || { credentials: [], reporting: [] }, repoName: path.basename(this.state.repo || ""), credsOn: !!(this.state.meta?.embedCreds !== false && this.ltCreds), visitor: (s) => s };
+    const plan = c.respond(text, ctx);
+    if (plan.options) {
+      const prev = { options: this.state.options, yaml: this.state.yaml, result: this.state.result };
+      const next = { ...this.state.options };
+      for (const [k, v] of Object.entries(plan.options)) {
+        if (v === null || v === undefined) delete next[k];
+        else if (k === "extraEnv" || k === "extraMatrix") next[k] = { ...(next[k] || {}), ...v };
+        else next[k] = v;
+      }
+      this.state.options = clean(next);
+      this.regenerate();
+      if (this.state.error) {
+        const err = this.state.error;
+        Object.assign(this.state, prev, { error: null, dirty: false });
+        this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
+        return reply(`I couldn't apply that: ${err}`);
+      }
+      return reply(`Done: ${plan.done.join(" · ")}.`, "YAML regenerated.");
+    }
+    if (plan.reset) { this.state.options = {}; this.regenerate(); return reply("Back to the detected defaults.", "YAML regenerated."); }
+    if (plan.undo) return reply("The Studio chat has no undo yet: use Reset under Setup → Options, or change the option back.");
+    if (plan.diagnose) {
+      const d = c.diagnose({ evidence: c.collectEvidence({ output: plan.diagnose }), yamlText: this.state.yaml, profile: this.state.profileFull, exitCode: 1, v02Name: c.v02FrameworkName(this.state.profileFull, this.state.profileFull.primaryFramework) });
+      const lines = [`Diagnosis: **${d.status}**.`, ...d.diagnoses.slice(0, 4).map((x) => `- **${x.title}**: ${x.why}${x.fixSummary ? ` Fix: ${x.fixSummary}.` : ""}`)];
+      if (d._fixes.length) {
+        let next = c.applyDiagnosisFixes(this.state.yaml, d);
+        if (Object.keys(next.options).length) next = c.applyDiagnosisFixes(c.generateYaml(this.state.profileFull, this.genOptions(next.options)).yaml, d, d._fixes.filter((f) => f.patch).map((f) => f.id));
+        if (next.yaml !== this.state.yaml) { this.pendingFix = next.yaml; lines.push("I prepared a corrected YAML. Say **apply the fix** to put it in the editor."); }
+      } else if (!d.diagnoses.length) lines.push("No known failure pattern matched.");
+      return reply(lines.join("\n"));
+    }
+    if (plan.optimize) {
+      const o = c.optimizeYaml(this.state.yaml, { profile: this.state.profileFull, repoPath: this.state.repo });
+      const list = c.describeSuggestions(o.suggestions || []);
+      return reply(list.length ? `${list.length} improvement(s):\n${list.map((s) => `- **${s.title}** (${s.severity}): ${s.why}`).join("\n")}\nApply them with **Optimize** in the YAML tab.` : "Nothing to optimize: this YAML already follows the recommendations.");
+    }
+    if (plan.pipeline) {
+      if (plan.pipeline === "ask") return reply("Which CI? Say GitHub Actions, GitLab, Jenkins or Azure DevOps.");
+      const p = c.generatePipeline({ ci: plan.pipeline, configFile: this.outputName(), yaml: this.state.yaml });
+      const doc = await vscode.workspace.openTextDocument({ content: p.content, language: p.path.endsWith("Jenkinsfile") ? "groovy" : "yaml" });
+      await vscode.window.showTextDocument(doc, { preview: false });
+      return reply(`Opened **${p.path}** for ${p.name} in an editor tab. Save it at that path in the repo.\n${p.notes.map((n) => `- ${n}`).join("\n")}`);
+    }
+    return reply(plan.reply + (plan.ai ? "\n\nFor free-form requests, choose an AI backend (HyperExecute: Choose AI Backend)." : ""));
   }
 
   // Apply the diagnosis's YAML fixes (or the AI's), save, and start the next attempt.

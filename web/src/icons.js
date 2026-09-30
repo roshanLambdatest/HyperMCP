@@ -27,5 +27,6 @@ export const icon = {
   code: svg('<path d="m8.5 8-4 4 4 4m7-8 4 4-4 4"/>'),
   layers: svg('<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>'),
   chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+  share: svg('<path d="M14 5h5v5M19 5l-8 8M18 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4"/>'),
   user: svg('<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>'),
 };

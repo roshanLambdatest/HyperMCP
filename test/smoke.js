@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 {
   const os = await import("node:os");
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache") });
+  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off" });
 }
 const fx = (n) => path.join(here, "fixtures", n);
 
@@ -268,6 +268,62 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   const prof = { tests: { classes: [{ methods: [1, 2, 3, 4, 5, 6] }], functions: [], scenarios: [] }, language: "java", primaryFramework: "testng" };
   const c1 = checkDiscovery({ repo: "/nope", yamlText: "version: 0.1\nautosplit: true\n", profile: prof, output: "", tests: [{}, {}] });
   check("fewer tests ran than the repo has → flagged", c1.verdict === "fewer-than-expected", c1);
+}
+
+// ---------- CI pipelines, playbook, Ruby, mobile, learning ----------
+{
+  const os = await import("node:os");
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-learn-"));
+  const repo5 = fs.mkdtempSync(path.join(os.tmpdir(), "he-learnrepo-"));
+  fs.cpSync(fx("maven-testng"), repo5, { recursive: true });
+  const env = { ...process.env, HE_STATE_DIR: state, HE_LEARN: "", HE_ACCURACY_CASES: "", ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") };
+  delete env.HE_ACCURACY_CASES;
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));
+  check("server sends its playbook to the client", /analyze_repo first/.test(client.getInstructions() || ""), (client.getInstructions() || "").slice(0, 200));
+
+  await call("generate_hyperexecute_yaml", { repoPath: repo5, yamlVersion: "0.1", write: true, outputFileName: "hyperexecute.yaml", tunnel: true, embedCredentials: false, extraEnv: { BASE_URL: "https://example.com" } });
+  let ci = await call("generate_ci_pipeline", { repoPath: repo5, ci: "github", write: true });
+  const wf = fs.existsSync(path.join(repo5, ".github/workflows/hyperexecute.yml")) ? fs.readFileSync(path.join(repo5, ".github/workflows/hyperexecute.yml"), "utf8") : "";
+  check("CI pipeline: GitHub Actions file written, secrets from the CI, fill step", /secrets\.LT_ACCESS_KEY/.test(wf) && /sed -e/.test(wf) && /--config \.hyperexecute-ci\.yaml/.test(wf) && !/\$\{\{ *\.secrets/.test(wf.replace(/\$\{\{ secrets\.LT_(USERNAME|ACCESS_KEY) \}\}/g, "")), ci.text.slice(0, 400));
+  ci = await call("generate_ci_pipeline", { repoPath: repo5, ci: "github", write: true });
+  check("CI pipeline: refuses to overwrite", ci.isError && /already exists/.test(ci.text), ci.text);
+  {
+    const withKey = await call("generate_hyperexecute_yaml", { repoPath: repo5, write: true, outputFileName: "keyed.yaml" });
+    const t = (await call("generate_ci_pipeline", { repoPath: repo5, ci: "gitlab", yamlPath: "keyed.yaml" })).text;
+    check("CI pipeline: warns when the YAML holds a plain access key", /contains a LambdaTest access key in plain text/.test(t) && !withKey.isError, t.slice(-500));
+  }
+  for (const sys of ["gitlab", "jenkins", "azure"]) {
+    const t = (await call("generate_ci_pipeline", { repoPath: repo5, ci: sys })).text;
+    check(`CI pipeline: ${sys}`, /hyperexecute --user "\$LT_USERNAME" --key "\$LT_ACCESS_KEY"/.test(t), t.slice(0, 300));
+  }
+
+  // Ruby + mobile capabilities
+  let rb = await call("generate_hyperexecute_yaml", { repoPath: fx("ruby-rspec"), splitBy: "method" });
+  check("Ruby RSpec: bundle install + rspec per example", /bundle install/.test(rb.text) && /bundle exec rspec "\$test"/.test(rb.text) && /language: ruby/.test(rb.text) && /version: 3\.2\.2|version: "3\.2\.2"/.test(rb.text), rb.text.slice(0, 800));
+  let d5 = JSON.parse((await call("dry_run_test_discovery", { repoPath: fx("ruby-rspec"), command: extract(rb) })).text);
+  check("Ruby RSpec: discovery finds file:line examples", d5.discovered === 2 && /spec\/cart_spec\.rb:\d+/.test(d5.items[0]), d5);
+  let capRb = await call("generate_lambdatest_capabilities", { repoPath: fx("ruby-rspec"), browser: "Firefox" });
+  check("Ruby grid helper", /Selenium::WebDriver::Options\.firefox/.test(capRb.text) && /lambdatest_driver\.rb/.test(capRb.text), capRb.text.slice(0, 300));
+  let capMob = await call("generate_lambdatest_capabilities", { repoPath: fx("pytest"), mobile: true, device: "Pixel 8" });
+  check("Appium real-device helper", /mobile-hub\.lambdatest\.com/.test(capMob.text) && /Pixel 8/.test(capMob.text) && /isRealMobile/.test(capMob.text) && /lt:\/\/APP_ID/.test(capMob.text), capMob.text.slice(0, 300));
+
+  // learning: the same choice twice becomes the starting point; explicit options still win
+  await call("generate_hyperexecute_yaml", { repoPath: repo5, runson: "win11", concurrency: 12, write: true, outputFileName: "a.yaml" });
+  await call("generate_hyperexecute_yaml", { repoPath: repo5, runson: "win11", concurrency: 12, write: true, outputFileName: "b.yaml" });
+  let lg = await call("generate_hyperexecute_yaml", { repoPath: repo5 });
+  check("learning: usual settings applied and announced", /runson: win11/.test(lg.text) && /concurrency: 12/.test(lg.text) && /usual settings/.test(lg.text), lg.text.slice(0, 700));
+  lg = await call("generate_hyperexecute_yaml", { repoPath: repo5, runson: "linux" });
+  check("learning: explicit option wins", /runson: linux/.test(lg.text) && /concurrency: 12/.test(lg.text), lg.text.slice(0, 500));
+  lg = await call("generate_hyperexecute_yaml", { repoPath: repo5, useLearned: false });
+  check("learning: useLearned:false ignores it", /runson: linux/.test(lg.text) && /concurrency: 5/.test(lg.text));
+
+  // a passing run is saved as an accuracy case, with credentials as references only
+  const r6 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo5 })).text);
+  const s6 = JSON.parse((await call("get_hyperexecute_run", { runId: r6.runId, waitSeconds: 30 })).text);
+  const caseDir = path.join(state, "accuracy-cases", path.basename(repo5));
+  const saved = fs.existsSync(path.join(caseDir, "expected.yaml")) ? fs.readFileSync(path.join(caseDir, "expected.yaml"), "utf8") : "";
+  check("passing run saved as an accuracy case", s6.status === "passed" && /saved as an accuracy case/.test(s6.savedAsAccuracyCase || "") && /tunnel: true/.test(saved) && !/test-key-123/.test(saved), JSON.stringify(s6).slice(0, 400));
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
