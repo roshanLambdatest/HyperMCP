@@ -1,6 +1,89 @@
 # HyperExecute Studio (MCP server + VS Code extension)
 
-Reads a test-automation repo, detects its stack, and generates, validates and dry-runs a HyperExecute YAML. It uses a bundled knowledge base plus your live Confluence space (`HYP` on lambdatest.atlassian.net).
+Reads a test-automation repo, detects its stack, and generates, validates and dry-runs a HyperExecute YAML. It uses a bundled knowledge base plus your live Confluence space (`HYP` on lambdatest.atlassian.net). There is also a browser-only version for customers in [`web/`](web/).
+
+## HyperExecute Studio vs Claude
+
+**HyperExecute Studio turns a customer's test repo into a checked, running HyperExecute setup in one conversation.** It is not a replacement for Claude: it is the set of HyperExecute tools that Claude (or Copilot) calls. Claude reads the request and decides; HyperExecute Studio does the work with fixed, tested rules, so the same repo always gives the same YAML.
+
+| By the numbers (v1.7.1) | |
+|---|---|
+| **99.5%** correct on real repos | measured on 23 of LambdaTest's own sample repos (88.1% before the 6 gaps this found were fixed) |
+| **20** test frameworks | Java, Node, Python, .NET |
+| **18** tools for Claude and Copilot | analyze, build, run, fix |
+| **72** automated checks | run on every release |
+| **10 files** in the protected `.vsix` | was 4,741 files, 6.4 MB |
+
+### How they work together
+
+You ask in plain words; Claude chooses each step and HyperExecute Studio carries it out.
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant Claude as Claude (decides)
+    participant Studio as HyperExecute Studio (fixed rules, no AI)
+    You->>Claude: Set up HyperExecute for this repo
+    Claude->>Studio: analyze_repo
+    Studio-->>Claude: stack, tests, confidence, questions to ask
+    Claude->>You: asks what is unclear
+    Claude->>Studio: generate_hyperexecute_yaml + checks
+    Studio-->>Claude: YAML with your account, validated, tests counted
+    Claude->>Studio: run_hyperexecute_job + get_hyperexecute_run
+    Studio-->>Claude: live log, per-test diagnosis, 0-test check
+    loop until it passes, a code bug is found, or 3 attempts
+        Claude->>Studio: fix_and_rerun_hyperexecute
+        Studio-->>Claude: YAML fixed, only affected tests rerun
+    end
+    Claude->>You: explains the result in plain words
+```
+
+### Side by side
+
+| | Claude | HyperExecute Studio |
+|---|---|---|
+| What it is | A general AI model that understands language and reasons | An MCP server with 18 HyperExecute / LambdaTest tools, also shipped inside the VS Code extension |
+| Intelligence | Understands the request, plans the steps, writes and edits code | None: fixed rules for detection, YAML building, validation and log diagnosis |
+| HyperExecute knowledge | General training knowledge; may be outdated or incomplete | Exact rules (v0.1 vs v0.2, the v0.2 `testDiscovery` 0-tests trap, `runson`, `$test`), a bundled knowledge base, 10 example YAMLs and the live Confluence `HYP` space |
+| Access to your systems | Only the tools it is given | Your LambdaTest account, live browser/OS lists, local test discovery, the HyperExecute CLI, job logs and reports |
+| Output | Can vary between runs | The same input always gives the same YAML and the same validation result |
+| Measured accuracy | Not measured for HyperExecute | 100% on 18 fixture cases; 99.5% on 23 LambdaTest sample repos |
+| Works on | Any task | HyperExecute test-automation repos: Java, Node, Python, .NET |
+
+### What each adds
+
+**HyperExecute Studio** returns checked facts, not guesses:
+
+| Job | Tools | What it gives Claude |
+|---|---|---|
+| Understand the repo | `analyze_repo` | Stack, tests, tags, env vars, Maven profiles, Gradle modules, workspace packages, plus confidence, assumptions and questions to ask |
+| Build the YAML | `generate_hyperexecute_yaml`, `optimize_hyperexecute_yaml` | A YAML for the detected framework (v0.2 native runner or v0.1), with your saved LambdaTest account already in it; ranked speed and cost fixes |
+| Check it | `validate_hyperexecute_yaml`, `dry_run_test_discovery` | Key, type and v0.1/v0.2 rule checks; the real list of tests discovered on your machine |
+| Run and fix | `run_hyperexecute_job`, `get_hyperexecute_run`, `fix_and_rerun_hyperexecute`, `diagnose_hyperexecute_logs` | Live logs, a diagnosis per failed test, YAML fixes, reruns of only the affected tests, and a warning when a green job ran 0 tests |
+| Stay safe | `scan_credentials_and_reporting`, `fix_hardcoded_credentials` | Hard-coded customer credentials and customer-side reporting (TestRail, Jira, Slack…) found before anything runs |
+| Connect to LambdaTest | `set_lambdatest_credentials`, `lambdatest_credentials_status`, `generate_lambdatest_capabilities` | One saved account used everywhere; grid capabilities from live browser/OS lists |
+| Know more | `search_knowledge_base`, `get_confluence_page`, `knowledge_base_status` | Search across the bundled notes, example YAMLs and Confluence, with synonyms |
+| Get better | `review_diagnosis_feedback` | Failures it didn't recognize, grouped, so they become new rules |
+
+**Claude** turns a request in plain words into the right tool calls, and handles whatever the rules don't cover:
+
+- **Understanding**: "Windows 11, 10 VMs, split by scenario, tunnel for staging" becomes the right generator options.
+- **Planning**: it picks which tools to call and in what order, and asks the analyzer's questions before generating.
+- **Unusual cases**: odd repo layouts, custom runners, or a failure no rule recognizes; it reads the code or the log digest and proposes a YAML change, which HyperExecute Studio then validates.
+- **Explaining**: it tells you why a YAML looks the way it does and what to fix, in your words.
+
+### Why not ask Claude alone?
+
+Claude alone can write a YAML that looks right; HyperExecute Studio catches the ways it goes wrong on the platform.
+
+| What goes wrong | What HyperExecute Studio does |
+|---|---|
+| A v0.2 YAML with a `testDiscovery` block runs 0 tests | The validator refuses it before the job starts |
+| The discovery command finds nothing on this repo layout (Cypress 9, pytest files not named `test_*`, Gradle modules) | Dry-run discovery runs it locally and shows the real count |
+| The job goes green having run 0 tests | The discovery check compares the platform's count with the dry run and flags it |
+| A test fails and is rerun again and again | Each failure is classified: code bugs are left alone; only YAML/environment failures are fixed and rerun |
+| The customer's own LambdaTest key or reporting stays in the code | The scan finds it and replaces it with `LT_USERNAME` / `LT_ACCESS_KEY` |
+| Keys and flags from memory are wrong or outdated | Rules and examples come from the HyperExecute docs and Confluence, and are tested |
 
 ## Tools
 | Tool | What it does |
