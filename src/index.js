@@ -22,7 +22,7 @@ import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimiz
 import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.7.0" });
+const server = new McpServer({ name: "hyperexecute", version: "1.7.1" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });

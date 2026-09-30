@@ -1,4 +1,4 @@
-# HyperExecute YAML MCP server
+# HyperExecute Studio (MCP server + VS Code extension)
 
 Reads a test-automation repo, detects its stack, and generates, validates and dry-runs a HyperExecute YAML. It uses a bundled knowledge base plus your live Confluence space (`HYP` on lambdatest.atlassian.net).
 
@@ -37,10 +37,10 @@ cd /Users/roshank/Downloads/hyperMCP && npm install && npm test
 
 **Claude Code (available in every repo).** Your LambdaTest account is saved once (Studio Setup card, or the `set_lambdatest_credentials` tool) in `~/.hyperexecute-studio/credentials.json` and used everywhere:
 ```bash
-claude mcp add hyperexecute-yaml -s user -- npx -y github:roshanLambdatest/HyperMCP
+claude mcp add hyperexecute -s user -- npx -y github:roshanLambdatest/HyperMCP
 # optional Confluence: add  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token>  before the --
 ```
-The server analyzes the folder Claude Code is running in. Needs Node.js 18+.
+The server (named `hyperexecute`) analyzes the folder Claude Code is running in. Upgrading from 1.7.0 or older? Remove the old name first: `claude mcp remove hyperexecute-yaml -s user`. Needs Node.js 18+.
 
 ## Accuracy check
 ```bash
@@ -91,7 +91,7 @@ Weekly: `npm run feedback` (or the `review_diagnosis_feedback` tool) → for eac
 
 1. Bump `version` in `vscode-extension/package.json` (e.g. `1.2.0`) and commit.
 2. `git tag v1.2.0 && git push origin main --tags`
-3. GitHub Actions runs the tests, builds `hyperexecute-yaml-studio.vsix`, and attaches it to the **v1.2.0** release.
+3. GitHub Actions runs the tests, builds `hyperexecute-studio.vsix`, and attaches it to the **v1.2.0** release.
 
 Teammates install it from the Releases page: download the `.vsix`, then in the Extensions view choose `⋯` → **Install from VSIX…**, then run **Developer: Reload Window**.
 

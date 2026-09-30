@@ -4,7 +4,7 @@
     { "type": "promptString", "id": "atlassian-token", "description": "Atlassian / Jira API token", "password": true }
   ],
   "servers": {
-    "hyperexecute-yaml": {
+    "hyperexecute": {
       "type": "stdio",
       "command": "node",
       "args": ["/Users/roshank/Downloads/hyperMCP/src/index.js"],

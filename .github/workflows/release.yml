@@ -43,14 +43,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" vscode-extension/hyperexecute-yaml-studio.vsix \
-            --title "HyperExecute YAML Studio $GITHUB_REF_NAME" \
-            --notes "Install: download hyperexecute-yaml-studio.vsix below → VS Code Extensions view → ⋯ → Install from VSIX… → then run Developer: Reload Window." \
+          gh release create "$GITHUB_REF_NAME" vscode-extension/hyperexecute-studio.vsix \
+            --title "HyperExecute Studio $GITHUB_REF_NAME" \
+            --notes "Install: download hyperexecute-studio.vsix below → VS Code Extensions view → ⋯ → Install from VSIX… → then run Developer: Reload Window." \
             --generate-notes
 
       - name: Upload build artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: hyperexecute-yaml-studio
-          path: vscode-extension/hyperexecute-yaml-studio.vsix
+          name: hyperexecute-studio
+          path: vscode-extension/hyperexecute-studio.vsix

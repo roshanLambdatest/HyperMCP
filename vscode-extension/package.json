@@ -1,8 +1,8 @@
 {
   "name": "hyperexecute-yaml-studio",
-  "displayName": "HyperExecute YAML Studio",
+  "displayName": "HyperExecute Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {
@@ -20,7 +20,7 @@
     "commands": [
       {
         "command": "hyperexecute.openStudio",
-        "title": "Open YAML Studio",
+        "title": "Open HyperExecute Studio",
         "category": "HyperExecute",
         "icon": "$(rocket)"
       },
@@ -59,7 +59,7 @@
         {
           "type": "webview",
           "id": "hyperexecute.studio",
-          "name": "YAML Studio",
+          "name": "HyperExecute Studio",
           "icon": "media/icon.svg"
         }
       ]
@@ -88,7 +88,7 @@
     "mcpServerDefinitionProviders": [
       {
         "id": "hyperexecute.mcp",
-        "label": "HyperExecute YAML"
+        "label": "HyperExecute Studio"
       }
     ],
     "configuration": {
@@ -147,7 +147,7 @@
   "scripts": {
     "sync": "node scripts/sync-core.js",
     "package": "node scripts/build-protected.js",
-    "package:dev": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-yaml-studio.vsix"
+    "package:dev": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-studio.vsix"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.129.0",

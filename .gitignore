@@ -11,3 +11,4 @@ target/
 .hyperexecute-rerun.yaml
 test/accuracy/last-report.json
 vscode-extension/.build/
+.gradle/

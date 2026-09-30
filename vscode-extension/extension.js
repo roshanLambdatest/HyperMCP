@@ -1,4 +1,4 @@
-// HyperExecute YAML Studio — VS Code extension host side.
+// HyperExecute Studio — VS Code extension host side.
 const vscode = require("vscode");
 const path = require("path");
 const fs = require("fs");
@@ -60,7 +60,7 @@ function activate(context) {
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.text = "$(rocket) HyperExecute";
-  status.tooltip = "Open HyperExecute YAML Studio";
+  status.tooltip = "Open HyperExecute Studio";
   status.command = "hyperexecute.openStudio";
   status.show();
   context.subscriptions.push(status);
@@ -109,11 +109,11 @@ function watchForNewerVersion(context, status) {
     if (!newest || cmpVersion(newest, running) <= 0 || offered === newest) return;
     offered = newest;
     status.text = "$(sync) HyperExecute: reload to update";
-    status.tooltip = `HyperExecute YAML Studio ${newest} is installed — this window is still running ${running}.`;
+    status.tooltip = `HyperExecute Studio ${newest} is installed — this window is still running ${running}.`;
     status.command = "workbench.action.reloadWindow";
     status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
     vscode.window
-      .showInformationMessage(`HyperExecute YAML Studio ${newest} is installed. Reload the window to use it (currently running ${running}).`, "Reload Window", "Later")
+      .showInformationMessage(`HyperExecute Studio ${newest} is installed. Reload the window to use it (currently running ${running}).`, "Reload Window", "Later")
       .then((pick) => pick === "Reload Window" && vscode.commands.executeCommand("workbench.action.reloadWindow"));
     Studio.current?.post({ type: "updateReady", version: newest, running });
   };
@@ -148,7 +148,7 @@ function registerMcpServer(context) {
           CONFLUENCE_SPACE: cfg.get("confluenceSpace") || "",
         };
         if (email && token) Object.assign(env, { ATLASSIAN_EMAIL: email, ATLASSIAN_API_TOKEN: token });
-        return [new vscode.McpStdioServerDefinition("HyperExecute YAML", process.execPath, [fs.existsSync(path.join(__dirname, "mcp.mjs")) ? path.join(__dirname, "mcp.mjs") : path.join(__dirname, "core", "index.js")], env, "1.0.0")];
+        return [new vscode.McpStdioServerDefinition("HyperExecute Studio", process.execPath, [fs.existsSync(path.join(__dirname, "mcp.mjs")) ? path.join(__dirname, "mcp.mjs") : path.join(__dirname, "core", "index.js")], env, "1.0.0")];
       },
     }),
     context.secrets.onDidChange(() => emitter.fire()),
@@ -190,7 +190,7 @@ async function chooseBackend(context) {
     id: k,
     description: k === "auto" ? `currently: ${ai.LABELS[b.name]}` : b.available[k] ? "available" : "not configured",
   }));
-  const pick = await vscode.window.showQuickPick(items, { placeHolder: "AI backend for the YAML Studio chat" });
+  const pick = await vscode.window.showQuickPick(items, { placeHolder: "AI backend for the HyperExecute Studio chat" });
   if (!pick) return;
   await vscode.workspace.getConfiguration("hyperexecute").update("aiBackend", pick.id, vscode.ConfigurationTarget.Global);
   if (pick.id === "anthropic-api" && !b.apiKey) await setAnthropicKey(context);
@@ -960,7 +960,7 @@ class Studio {
     return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${w.cspSource}; img-src ${w.cspSource} data:; font-src ${w.cspSource}; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="${media("studio.css")}"><title>HyperExecute YAML Studio</title></head>
+<link rel="stylesheet" href="${media("studio.css")}"><title>HyperExecute Studio</title></head>
 <body><div id="app"></div><script nonce="${nonce}" src="${media("studio.js")}"></script></body></html>`;
   }
 }

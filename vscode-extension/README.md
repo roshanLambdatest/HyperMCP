@@ -1,4 +1,4 @@
-# HyperExecute YAML Studio
+# HyperExecute Studio
 
 A docked side-bar view (like Claude Code) for building HyperExecute YAMLs from the repo you have open. It never takes over your editor. Drag the ⚡ icon to the Secondary Side Bar if you prefer it on the right.
 
@@ -14,6 +14,6 @@ A docked side-bar view (like Claude Code) for building HyperExecute YAMLs from t
 - **Reload to update**: when a newer version is installed while VS Code is open, a prompt and a status-bar item offer **Reload Window**.
 - **MCP server**: the same tools are registered for VS Code agent mode.
 
-Open it from the ⚡ icon in the Activity Bar, the `HyperExecute` status bar item, or **HyperExecute: Open YAML Studio** in the Command Palette. It has five tabs: **Chat**, **YAML**, **Grid**, **Runs** and **Setup**.
+Open it from the ⚡ icon in the Activity Bar, the `HyperExecute` status bar item, or **HyperExecute: Open HyperExecute Studio** in the Command Palette. It has five tabs: **Chat**, **YAML**, **Grid**, **Runs** and **Setup**.
 
 AI backends (auto order): Claude Code CLI, then a VS Code language model, then an Anthropic API key, then offline rules.

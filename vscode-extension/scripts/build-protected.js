@@ -5,7 +5,7 @@
 //   - no node_modules, core/, knowledge/, tests or scripts in the package
 // Bundled + obfuscated code is hard to read, not impossible: VS Code still has to run it.
 //
-//   npm run package        → hyperexecute-yaml-studio.vsix (protected)
+//   npm run package        → hyperexecute-studio.vsix (protected)
 //   npm run package:dev    → the old readable package, for debugging
 
 const fs = require("fs");
@@ -18,7 +18,7 @@ const ext = path.join(__dirname, "..");
 const root = path.join(ext, "..");
 const work = path.join(ext, ".build");
 const pkgDir = path.join(work, "pkg");
-const out = path.join(ext, "hyperexecute-yaml-studio.vsix");
+const out = path.join(ext, "hyperexecute-studio.vsix");
 
 fs.rmSync(work, { recursive: true, force: true });
 fs.mkdirSync(path.join(pkgDir, "media"), { recursive: true });

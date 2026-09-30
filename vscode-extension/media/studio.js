@@ -1,4 +1,4 @@
-// HyperExecute YAML Studio — webview UI (vanilla JS).
+// HyperExecute Studio — webview UI (vanilla JS).
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (sel, el = document) => el.querySelector(sel);
