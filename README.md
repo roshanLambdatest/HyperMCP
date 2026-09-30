@@ -16,7 +16,9 @@ Reads a test-automation repo, detects its stack, and generates, validates and dr
 | `fix_hardcoded_credentials` | Rewrites hard-coded credentials to read `LT_USERNAME` / `LT_ACCESS_KEY`. Dry run by default |
 | `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists. Can write a helper file |
 | `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
-| `run_hyperexecute_job` | Starts a watched job with the CLI (downloaded automatically) using `LT_USERNAME` / `LT_ACCESS_KEY` from the server env; returns a runId |
+| `set_lambdatest_credentials` | Verifies and saves your LambdaTest account once (shared with the Studio) |
+| `lambdatest_credentials_status` | Which account runs will use (key masked) |
+| `run_hyperexecute_job` | Starts a watched job with the CLI (downloaded automatically) using your saved account; returns a runId |
 | `get_hyperexecute_run` | Live log tail while running; when finished, a diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed YAML fixes |
 | `fix_and_rerun_hyperexecute` | Applies the diagnosis fixes (or your YAML), validates, writes, and starts the next attempt. Per test: code failures are left alone; tests that failed for YAML/environment reasons get the fix and are rerun on their own. Takes `values` for env vars the tests need. Refuses for code-only failures, login errors, or after max attempts |
 | `diagnose_hyperexecute_logs` | Diagnoses pasted logs or a downloaded log folder and returns the corrected YAML |
@@ -32,7 +34,7 @@ cd /Users/roshank/Downloads/hyperMCP && npm install && npm test
 
 **VS Code (Copilot agent mode):** copy `examples/vscode-mcp.json` to `<your-automation-repo>/.vscode/mcp.json`, or add it to your user MCP config via *MCP: Open User Configuration*. Start the server from the file, and VS Code prompts once for your Atlassian email and token, then stores them encrypted.
 
-**Claude Code (available in every repo).** To let it run jobs, add your account with `-e LT_USERNAME=... -e LT_ACCESS_KEY=...` before the `--`:
+**Claude Code (available in every repo).** Your LambdaTest account is saved once (Studio Setup card, or the `set_lambdatest_credentials` tool) in `~/.hyperexecute-studio/credentials.json` and used everywhere:
 ```bash
 claude mcp add hyperexecute-yaml -s user -- npx -y github:roshanLambdatest/HyperMCP
 # optional Confluence: add  -e ATLASSIAN_EMAIL=you@lambdatest.com -e ATLASSIAN_API_TOKEN=<token>  before the --
@@ -57,3 +59,8 @@ The server analyzes the folder Claude Code is running in. Needs Node.js 18+.
 3. GitHub Actions runs the tests, builds `hyperexecute-yaml-studio.vsix`, and attaches it to the **v1.2.0** release.
 
 Teammates install it from the Releases page: download the `.vsix`, then in the Extensions view choose `⋯` → **Install from VSIX…**, then run **Developer: Reload Window**.
+
+## LambdaTest account: saved once, used everywhere
+- Save it once: Studio **Setup → LambdaTest account**, or the `set_lambdatest_credentials` MCP tool. It's verified against LambdaTest, then stored in `~/.hyperexecute-studio/credentials.json` (readable only by you). The Studio also keeps a copy in VS Code's secret storage.
+- The CLI gets it through its environment. The HyperExecute CLI itself is downloaded automatically to `~/.hyperexecute-studio/bin/`.
+- Generated YAMLs map `LT_USERNAME` / `LT_ACCESS_KEY` to `${{ .secrets.* }}`, which is safe to commit. For each run, a short-lived copy with your values filled in is passed to the CLI, then deleted, so no portal secrets are needed. Running the CLI by hand still needs those secrets in HyperExecute.

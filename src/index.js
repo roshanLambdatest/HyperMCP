@@ -11,6 +11,7 @@ import YAML from "yaml";
 import { analyzeRepo, summarizeProfile } from "./analyzer.js";
 import { generateYaml, v02FrameworkName } from "./generator.js";
 import { ensureCli, startRun } from "./runner.js";
+import { loadCreds, saveCreds, verifyCreds, CREDS_FILE } from "./credentials.js";
 import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis, buildTargetedRerun, fixableSelectors } from "./doctor.js";
 import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS } from "./knowledge.js";
@@ -19,7 +20,7 @@ import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } 
 import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.5.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.6.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -404,11 +405,10 @@ server.registerTool(
 const runs = new Map(); // runId → run record (this server process only)
 
 function ltCreds() {
-  const username = process.env.LT_USERNAME;
-  const accessKey = process.env.LT_ACCESS_KEY;
-  if (!username || !accessKey)
-    throw new Error("LT_USERNAME / LT_ACCESS_KEY aren't set for this MCP server. Re-register it with: claude mcp add hyperexecute-yaml -s user -e LT_USERNAME=<user> -e LT_ACCESS_KEY=<key> -- npx -y github:roshanLambdatest/HyperMCP");
-  return { username, accessKey };
+  const c = loadCreds();
+  if (!c)
+    throw new Error("No LambdaTest account saved. Save it once in the VS Code Studio (Setup → LambdaTest account) or with the set_lambdatest_credentials tool — it's then used for every run, the YAML and the grid.");
+  return c;
 }
 
 async function launch(repo, config, attempt, parent, mainConfig = config) {
@@ -457,11 +457,43 @@ function runView(rec, tailChars = 3000) {
 }
 
 server.registerTool(
+  "set_lambdatest_credentials",
+  {
+    title: "Save LambdaTest credentials (once)",
+    description:
+      "Verify and save the user's LambdaTest username and access key to ~/.hyperexecute-studio/credentials.json (mode 600), shared with the VS Code Studio. After this, every run, the YAML's LT_USERNAME/LT_ACCESS_KEY and the grid connection use them without asking again. Prefer the Studio's Setup card, which keeps the key out of the chat.",
+    inputSchema: { username: z.string(), accessKey: z.string() },
+  },
+  async ({ username, accessKey }) => {
+    const v = await verifyCreds(username.trim(), accessKey.trim());
+    if (!v.ok) return fail(new Error(v.text));
+    saveCreds({ username: username.trim(), accessKey: accessKey.trim() });
+    return text(`${v.text}. Saved for all future runs (${CREDS_FILE}).`);
+  }
+);
+
+server.registerTool(
+  "lambdatest_credentials_status",
+  {
+    title: "LambdaTest credentials status",
+    description: "Which LambdaTest account runs will use (never shows the key) and whether it still works.",
+    inputSchema: { verify: z.boolean().optional() },
+  },
+  async ({ verify }) => {
+    const c = loadCreds();
+    if (!c) return text({ saved: false, next: "Save it once: Studio Setup card, or set_lambdatest_credentials." });
+    const out = { saved: true, username: c.username, source: c.source, accessKey: c.accessKey.slice(0, 3) + "****" };
+    if (verify) out.check = (await verifyCreds(c.username, c.accessKey)).text;
+    return text(out);
+  }
+);
+
+server.registerTool(
   "run_hyperexecute_job",
   {
     title: "Run HyperExecute job (watched)",
     description:
-      "Start a HyperExecute job for the repo with the CLI (downloaded automatically if needed) and watch it. Returns a runId immediately; poll get_hyperexecute_run for progress and, when finished, a diagnosis of any failure with proposed YAML fixes. Uses LT_USERNAME / LT_ACCESS_KEY from this MCP server's environment. Scan for hard-coded customer credentials first (scan_credentials_and_reporting).",
+      "Start a HyperExecute job for the repo with the CLI (downloaded automatically if needed) and watch it. Returns a runId immediately; poll get_hyperexecute_run for progress and, when finished, a diagnosis of any failure with proposed YAML fixes. Uses the saved LambdaTest account (set once via the Studio or set_lambdatest_credentials) for the CLI and fills the YAML's LT_USERNAME/LT_ACCESS_KEY secrets for the VMs in a temporary copy. Scan for hard-coded customer credentials first (scan_credentials_and_reporting).",
     inputSchema: { repoPath: z.string().optional(), yamlPath: z.string().optional().describe("Default hyperexecute.yaml") },
   },
   async ({ repoPath, yamlPath }) => {

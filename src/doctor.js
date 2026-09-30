@@ -189,7 +189,7 @@ const RULES = [
         summary: "Mapped LT_USERNAME / LT_ACCESS_KEY from HyperExecute secrets",
       };
     },
-    advice: "Create secrets named LT_USERNAME and LT_ACCESS_KEY in HyperExecute (Settings → Secrets) for your account.",
+    advice: "Runs fill LT_USERNAME / LT_ACCESS_KEY from your saved account. If this persists, check the account in Setup (Save & test) and that the tests read those variables.",
   },
   {
     id: "no-tests-executed", category: "discovery",
@@ -362,7 +362,7 @@ const TEST_RULES = [
     fix: (ctx) => (ctx.js.tunnel ? { none: "tunnel is already on — check the tunnel is running and can reach the host" } : { key: "tunnel", summary: "Enable tunnel: true", patch: (d) => d.set("tunnel", true) }) },
   { id: "grid-auth", cause: "yaml", re: /(hub|cdp)\.lambdatest\.com[^\n]*(401|Unauthorized)|Unauthorized[^\n]*lambdatest|Invalid (LambdaTest )?username or access ?key/i,
     reason: "The test couldn't log in to the LambdaTest grid — LT_USERNAME / LT_ACCESS_KEY aren't reaching it.",
-    fix: (ctx) => (ctx.js.env?.LT_USERNAME && ctx.js.env?.LT_ACCESS_KEY ? { none: "Create secrets LT_USERNAME / LT_ACCESS_KEY in HyperExecute for your account" } : { key: "lt-secrets", summary: "Map LT_USERNAME / LT_ACCESS_KEY from HyperExecute secrets", patch: (d) => { d.setIn(["env", "LT_USERNAME"], "${{ .secrets.LT_USERNAME }}"); d.setIn(["env", "LT_ACCESS_KEY"], "${{ .secrets.LT_ACCESS_KEY }}"); } }) },
+    fix: (ctx) => (ctx.js.env?.LT_USERNAME && ctx.js.env?.LT_ACCESS_KEY ? { none: "The YAML already maps them and runs fill in your saved account — check the account in Setup (Save & test), or that the test reads LT_USERNAME / LT_ACCESS_KEY" } : { key: "lt-secrets", summary: "Map LT_USERNAME / LT_ACCESS_KEY from HyperExecute secrets", patch: (d) => { d.setIn(["env", "LT_USERNAME"], "${{ .secrets.LT_USERNAME }}"); d.setIn(["env", "LT_ACCESS_KEY"], "${{ .secrets.LT_ACCESS_KEY }}"); } }) },
   { id: "grid-capacity", cause: "yaml", re: /queue timeout|too many (concurrent )?(sessions|requests)|concurrency limit|exceeded (the )?(allowed )?parallel/i,
     reason: "The grid rejected the session because too many ran at once.",
     fix: (ctx) => { const n = Math.max(1, Math.floor((ctx.js.concurrency || 2) / 2)); return { key: "concurrency", summary: `Lower concurrency to ${n}`, patch: (d) => d.set("concurrency", n) }; } },

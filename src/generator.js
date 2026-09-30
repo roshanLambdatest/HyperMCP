@@ -461,12 +461,17 @@ function generateV02(profile, fw, name, opts) {
 
 function buildEnv(profile, base, opts, notes) {
   const env = { ...base };
+  // The saved LambdaTest account is filled into these at run time (see credentials.runtimeConfig),
+  // so tests on the VMs can reach the grid without secrets being created in the portal.
+  env.LT_USERNAME = "${{ .secrets.LT_USERNAME }}";
+  env.LT_ACCESS_KEY = "${{ .secrets.LT_ACCESS_KEY }}";
   for (const v of profile.envVars) {
     if (env[v]) continue;
     env[v] = SECRET_LIKE.test(v) ? `\${{ .secrets.${v} }}` : `<set ${v}>`;
   }
   Object.assign(env, opts.extraEnv || {});
-  const secrets = Object.entries(env).filter(([, v]) => String(v).includes(".secrets.")).map(([k]) => k);
+  const secrets = Object.entries(env).filter(([, v]) => String(v).includes(".secrets.")).map(([k]) => k).filter((k) => !["LT_USERNAME", "LT_ACCESS_KEY"].includes(k));
+  notes.push("LT_USERNAME / LT_ACCESS_KEY are filled from your saved LambdaTest account when the Studio or MCP runs the job — no portal secrets needed. (Running the CLI by hand? Create them under HyperExecute → Settings → Secrets.)");
   if (secrets.length) notes.push(`Create these secrets in HyperExecute (Settings → Secrets) before running: ${secrets.join(", ")}.`);
   const placeholders = Object.entries(env).filter(([, v]) => String(v).startsWith("<set ")).map(([k]) => k);
   if (placeholders.length) notes.push(`Fill in values for env vars your code reads: ${placeholders.join(", ")} (remove any that aren't needed).`);

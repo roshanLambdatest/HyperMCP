@@ -206,6 +206,21 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     const rr3 = fs.readFileSync(path.join(tmpRepo, ".hyperexecute-rerun.yaml"), "utf8");
     check("rerun failed as-is targets all 4 failed tests", ["validLogin", "invalidLogin", "forgotPassword", "logout"].every((t) => rr3.includes("LoginTest#" + t)) && lastState().run.targeted);
   }
+  if (process.env.SHARED_CREDS) {
+    // an account saved earlier by the MCP tool, never entered in the Studio
+    const dir = path.join(require("os").homedir(), ".hyperexecute-studio");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "credentials.json"), JSON.stringify({ username: "roshan", accessKey: "LT_SharedKey1234567890abcdef" }));
+    process.env.HE_CLI_PATH = path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute-tests.cjs");
+    fs.rmSync(path.join(tmpRepo, ".fake-runs"), { force: true });
+    await send({ type: "resetOptions" });
+    await send({ type: "setOptions", options: { yamlVersion: "0.1", extraEnv: { BASE_URL: "https://example.com" } } });
+    const before = posted.length;
+    await send({ type: "run", auto: false, maxAttempts: 1 });
+    const asked = posted.slice(before).some((m) => m.type === "showPane" && m.pane === "setup");
+    check("Studio uses the account saved by the MCP tool, no Setup prompt", !asked && lastState().run?.attempt === 1 && lastState().meta.ltUser === "roshan", JSON.stringify(lastState().run?.status));
+    check("Studio run filled the temporary YAML and removed it", /filled$/.test(fs.readFileSync(path.join(tmpRepo, ".fake-last-config"), "utf8")) && !fs.readdirSync(tmpRepo).some((n) => n.startsWith(".hyperexecute-run-")));
+  }
   if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
   process.exit(fails ? 1 : 0);

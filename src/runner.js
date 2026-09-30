@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { runtimeConfig } from "./credentials.js";
 
 const CACHE_DIR = path.join(os.homedir(), ".hyperexecute-studio", "bin");
 
@@ -39,7 +40,9 @@ export function startRun({ cli, repoPath, config = "hyperexecute.yaml", username
   artifactsDir = artifactsDir || fs.mkdtempSync(path.join(os.tmpdir(), "he-artifacts-"));
   if (!username || !accessKey) throw new Error("LambdaTest username and access key are required (LT_USERNAME / LT_ACCESS_KEY).");
   const startedAt = Date.now();
-  const args = ["--config", config, "--download-logs", "--download-report", "--download-artifacts", "--download-artifacts-path", artifactsDir, ...extraArgs];
+  // Fill the .secrets.LT_USERNAME / LT_ACCESS_KEY references from the user account in a short-lived copy.
+  const rc = runtimeConfig(repoPath, config, { username, accessKey });
+  const args = ["--config", rc.config, "--download-logs", "--download-report", "--download-artifacts", "--download-artifacts-path", artifactsDir, ...extraArgs];
   const child = spawn(cli, args, {
     cwd: repoPath,
     env: { ...process.env, LT_USERNAME: username, LT_ACCESS_KEY: accessKey },
@@ -57,8 +60,8 @@ export function startRun({ cli, repoPath, config = "hyperexecute.yaml", username
   child.stdout.on("data", take);
   child.stderr.on("data", take);
   const promise = new Promise((resolve) => {
-    child.on("error", (e) => { take(Buffer.from(`\n[runner] failed to start CLI: ${e.message}\n`)); resolve({ exitCode: -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }); });
-    child.on("close", (code) => resolve({ exitCode: code ?? -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }));
+    child.on("error", (e) => { take(Buffer.from(`\n[runner] failed to start CLI: ${e.message}\n`)); rc.cleanup(); resolve({ exitCode: -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }); });
+    child.on("close", (code) => { rc.cleanup(); resolve({ exitCode: code ?? -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }); });
   });
   return {
     promise,

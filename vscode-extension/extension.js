@@ -11,7 +11,7 @@ let core;
 async function loadCore() {
   if (!core) {
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -353,7 +353,8 @@ class Studio {
         if (!t.ok) return this.post({ type: "ltStatus", ok: false, text: t.text });
         await this.context.globalState.update("hyperexecute.ltUsername", username);
         await this.context.secrets.store("hyperexecute.ltAccessKey", accessKey);
-        this.post({ type: "ltStatus", ok: true, text: t.text });
+        c.saveCreds({ username, accessKey }); // shared with the MCP server (Claude Code / Copilot)
+        this.post({ type: "ltStatus", ok: true, text: t.text + " — saved for the Studio and the MCP tools" });
         await this.refreshMeta();
         break;
       }
@@ -366,6 +367,7 @@ class Studio {
       case "ltAccountClear":
         await this.context.globalState.update("hyperexecute.ltUsername", undefined);
         await this.context.secrets.delete("hyperexecute.ltAccessKey");
+        c.clearCreds();
         this.post({ type: "ltStatus", ok: false, text: "Removed" });
         await this.refreshMeta();
         break;
@@ -584,10 +586,20 @@ class Studio {
   }
 
   // ---------- LambdaTest account (used by ▶ Run) ----------
+  // Studio secret storage first, then the account saved by the MCP tool (~/.hyperexecute-studio).
   async ltAccount() {
     const username = this.context.globalState.get("hyperexecute.ltUsername") || "";
     const accessKey = (await this.context.secrets.get("hyperexecute.ltAccessKey")) || "";
-    return { username, accessKey };
+    if (username && accessKey) return { username, accessKey, source: "vscode" };
+    const c = await loadCore();
+    const shared = c.loadCreds();
+    if (shared) {
+      await this.context.globalState.update("hyperexecute.ltUsername", shared.username);
+      await this.context.secrets.store("hyperexecute.ltAccessKey", shared.accessKey);
+      if (this.state.meta) Object.assign(this.state.meta, { ltUser: shared.username, ltReady: true });
+      return { username: shared.username, accessKey: shared.accessKey, source: "shared" };
+    }
+    return { username: "", accessKey: "" };
   }
 
   async testLtAccount(username, accessKey) {

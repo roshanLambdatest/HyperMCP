@@ -26,7 +26,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -143,6 +143,37 @@ check("assertion failures → not a YAML problem", dl.diagnosis.status === "test
   check("main YAML fixed (tunnel + env value), rerun YAML separate", /tunnel: true/.test(fs.readFileSync(repo2 + "/hyperexecute.yaml", "utf8")) && /PAYMENT_API_URL: https:\/\/pay/.test(fs.readFileSync(repo2 + "/hyperexecute.yaml", "utf8")) && fs.existsSync(repo2 + "/.hyperexecute-rerun.yaml"), f1);
   let s2 = JSON.parse((await call("get_hyperexecute_run", { runId: f1.nextRun.runId, waitSeconds: 30 })).text);
   check("targeted rerun passed", s2.status === "passed" && s2.targetedRerun === true && s2.diagnosis.tests.total === 2, s2);
+}
+
+// Credentials saved once (isolated HOME so the real ~/.hyperexecute-studio is never touched)
+{
+  const os = await import("node:os");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "he-home-"));
+  const repo3 = fs.mkdtempSync(path.join(os.tmpdir(), "he-creds-"));
+  fs.cpSync(fx("maven-testng"), repo3, { recursive: true });
+  const env = { ...process.env, HOME: home, USERPROFILE: home, ATLASSIAN_API_TOKEN: "", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute-tests.cjs") };
+  delete env.LT_USERNAME; delete env.LT_ACCESS_KEY;
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));
+  let st0 = JSON.parse((await call("lambdatest_credentials_status", {})).text);
+  check("no account saved initially", st0.saved === false, st0);
+  let bad = await call("set_lambdatest_credentials", { username: "nobody", accessKey: "not-a-real-key-12345678901234" });
+  check("bad account rejected by LambdaTest and not saved", bad.isError && /401/.test(bad.text) && !fs.existsSync(path.join(home, ".hyperexecute-studio", "credentials.json")), bad.text);
+  // simulate a verified save (no real key is available to the tests)
+  fs.mkdirSync(path.join(home, ".hyperexecute-studio"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".hyperexecute-studio", "credentials.json"), JSON.stringify({ username: "roshan", accessKey: "LT_SavedKey1234567890abcdefXYZ" }), { mode: 0o600 });
+  let st1 = JSON.parse((await call("lambdatest_credentials_status", {})).text);
+  check("saved account picked up, key masked", st1.saved && st1.username === "roshan" && st1.accessKey === "LT_****", st1);
+  const gy = (await call("generate_hyperexecute_yaml", { repoPath: repo3, yamlVersion: "0.1", write: true, extraEnv: { BASE_URL: "https://example.com" } })).text;
+  check("YAML maps LT_USERNAME / LT_ACCESS_KEY as secret refs, no plain key", /LT_ACCESS_KEY: \$\{\{ \.secrets\.LT_ACCESS_KEY \}\}/.test(gy) && !gy.includes("LT_SavedKey"), gy.slice(0, 500));
+  let r = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo3 })).text);
+  let s3 = JSON.parse((await call("get_hyperexecute_run", { runId: r.runId, waitSeconds: 30 })).text);
+  const leftovers = fs.readdirSync(repo3).filter((n) => n.startsWith(".hyperexecute-run-"));
+  const last = fs.readFileSync(path.join(repo3, ".fake-last-config"), "utf8");
+  check("run used the saved account without asking", s3.status !== "running" && !/No LambdaTest account/.test(JSON.stringify(s3)), s3.status);
+  check("CLI got a temporary YAML with the credentials filled in", /^\.hyperexecute-run-.*\.yaml filled$/.test(last), last);
+  check("temporary YAML deleted; saved YAML still has only secret refs", leftovers.length === 0 && !fs.readFileSync(path.join(repo3, "hyperexecute.yaml"), "utf8").includes("LT_SavedKey"), leftovers);
+  check("key never in output", !JSON.stringify(s3).includes("LT_SavedKey1234567890abcdefXYZ"));
 }
 
 // Knowledge base
