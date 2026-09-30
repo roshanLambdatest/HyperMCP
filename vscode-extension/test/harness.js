@@ -178,6 +178,34 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     check("AI suggestion returned and validated", r.aiSuggestion && r.aiSuggestion.reply && !/^Error/.test(r.aiSuggestion.reply) && (r.aiSuggestion.action !== "replace_yaml" || typeof r.aiSuggestion.valid === "boolean"), JSON.stringify(r.aiSuggestion).slice(0, 500));
     delete process.env.HE_FAKE;
   }
+  if (process.env.WATCH_TESTS) {
+    process.env.HE_CLI_PATH = path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute-tests.cjs");
+    ctx.globalState._m.set("hyperexecute.ltUsername", "tester");
+    secrets.set("hyperexecute.ltAccessKey", "super-secret-key-42");
+    const reset = async () => { fs.rmSync(path.join(tmpRepo, ".fake-runs"), { force: true }); await send({ type: "resetOptions" }); await send({ type: "setOptions", options: { yamlVersion: "0.1", extraEnv: { BASE_URL: "https://example.com" } } }); };
+    // auto
+    await reset();
+    await send({ type: "run", auto: true, maxAttempts: 3 });
+    let r = lastState().run;
+    console.log("  auto:", r.history.map((x) => `#${x.attempt}${x.targeted ? "(affected)" : ""} ${x.status} [${x.tests?.failed ?? "-"} failed] ${x.changes.join("; ")}`).join(" | "));
+    const rr = fs.readFileSync(path.join(tmpRepo, ".hyperexecute-rerun.yaml"), "utf8");
+    check("auto: fixes tunnel, reruns ONLY the network test, never guesses PAYMENT_API_URL", r.history.length === 2 && r.history[1].targeted && /LoginTest#invalidLogin/.test(rr) && !/forgotPassword|#validLogin|logout/.test(rr) && !/PAYMENT_API_URL/.test(fs.readFileSync(path.join(tmpRepo, "hyperexecute.yaml"), "utf8")) && r.status === "passed", JSON.stringify(r.history));
+    // manual with a value
+    await reset();
+    await send({ type: "run", auto: false, maxAttempts: 3 });
+    r = lastState().run;
+    check("manual: per-test breakdown 2 code / 2 yaml, asks for value", r.status === "fixable-tests" && r.diagnosis.tests.code === 2 && r.diagnosis.tests.yaml === 2 && r.diagnosis.needsValue.includes("PAYMENT_API_URL"), r.status);
+    await send({ type: "runApplyFixes", rerun: true, values: { PAYMENT_API_URL: "https://pay.example.com" } });
+    r = lastState().run;
+    const rr2 = fs.readFileSync(path.join(tmpRepo, ".hyperexecute-rerun.yaml"), "utf8");
+    check("manual: reruns the 2 YAML tests only, both pass; code tests untouched", r.status === "passed" && /invalidLogin/.test(rr2) && /forgotPassword/.test(rr2) && !/#validLogin|logout/.test(rr2) && /PAYMENT_API_URL: https:\/\/pay/.test(fs.readFileSync(path.join(tmpRepo, "hyperexecute.yaml"), "utf8")), rr2);
+    // rerun failed as-is
+    await reset();
+    await send({ type: "run", auto: false, maxAttempts: 5 });
+    await send({ type: "runRerun", onlyFailed: true });
+    const rr3 = fs.readFileSync(path.join(tmpRepo, ".hyperexecute-rerun.yaml"), "utf8");
+    check("rerun failed as-is targets all 4 failed tests", ["validLogin", "invalidLogin", "forgotPassword", "logout"].every((t) => rr3.includes("LoginTest#" + t)) && lastState().run.targeted);
+  }
   if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
   process.exit(fails ? 1 : 0);

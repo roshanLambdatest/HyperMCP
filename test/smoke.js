@@ -123,6 +123,28 @@ check("no rerun after pass", refuse.isError && /passed/.test(refuse.text), refus
 let dl = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: "Tests run: 5, Failures: 2\njava.lang.AssertionError: expected [x] but found [y]" })).text);
 check("assertion failures → not a YAML problem", dl.diagnosis.status === "test-failures" && !dl.fixedYaml, dl);
 
+// Per-test: fix only YAML-caused failures, rerun only those tests, leave code failures alone
+{
+  const repo2 = fs.mkdtempSync(path.join((await import("node:os")).tmpdir(), "he-tests-"));
+  fs.cpSync(fx("maven-testng"), repo2, { recursive: true });
+  await call("generate_hyperexecute_yaml", { repoPath: repo2, yamlVersion: "0.1", write: true, extraEnv: { BASE_URL: "https://example.com" } });
+  process.env.__keep = "";
+  const t = await import("node:child_process");
+  // point this server at the per-test fake CLI for the rest of the file
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute-tests.cjs") } }));
+  let r1 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo2 })).text);
+  let s1 = JSON.parse((await call("get_hyperexecute_run", { runId: r1.runId, waitSeconds: 30 })).text);
+  const tl = s1.diagnosis?.tests;
+  check("per-test: 4 failed = 2 code + 2 yaml", tl && tl.failed === 4 && tl.code === 2 && tl.yaml === 2, s1);
+  check("per-test: needs PAYMENT_API_URL value", s1.status === "fixable-tests" && s1.diagnosis.needsValue.includes("PAYMENT_API_URL"), s1.status);
+  let f1 = JSON.parse((await call("fix_and_rerun_hyperexecute", { runId: r1.runId, values: { PAYMENT_API_URL: "https://pay.example.com" } })).text);
+  check("targeted rerun of only the 2 YAML-affected tests", f1.rerunOnly?.length === 2 && f1.rerunOnly.every((x) => /invalidLogin|forgotPassword/.test(x)) && f1.leftAlone.length === 2, f1);
+  check("main YAML fixed (tunnel + env value), rerun YAML separate", /tunnel: true/.test(fs.readFileSync(repo2 + "/hyperexecute.yaml", "utf8")) && /PAYMENT_API_URL: https:\/\/pay/.test(fs.readFileSync(repo2 + "/hyperexecute.yaml", "utf8")) && fs.existsSync(repo2 + "/.hyperexecute-rerun.yaml"), f1);
+  let s2 = JSON.parse((await call("get_hyperexecute_run", { runId: f1.nextRun.runId, waitSeconds: 30 })).text);
+  check("targeted rerun passed", s2.status === "passed" && s2.targetedRerun === true && s2.diagnosis.tests.total === 2, s2);
+}
+
 // Knowledge base
 let k = JSON.parse((await call("search_knowledge_base", { query: "cucumber report partialReports" })).text);
 check("local KB search", k.local.length > 0 && k.confluence.configured === false, k);

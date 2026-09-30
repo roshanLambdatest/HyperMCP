@@ -322,10 +322,10 @@ class Studio {
         this.stopRun();
         break;
       case "runApplyFixes":
-        await this.applyRunFixes(m.ids || null, m.rerun !== false);
+        await this.applyRunFixes(m.ids || null, m.rerun !== false, m.values || {});
         break;
       case "runRerun":
-        if (!this.runHandle && this.state.run) { this.state.run.maxAttempts = Math.max(this.state.run.maxAttempts, this.state.run.attempt + 1); await this.startAttempt(); }
+        if (!this.runHandle && this.state.run) { this.state.run.maxAttempts = Math.max(this.state.run.maxAttempts, this.state.run.attempt + 1); await this.startAttempt(m.onlyFailed && this.lastDiagnosis?.tests?.list?.length ? this.buildFailedOnlyRerun() : undefined); }
         break;
       case "runAskAI":
         await this.askAiForRunFix();
@@ -718,7 +718,7 @@ class Studio {
     return this.channel;
   }
 
-  async startAttempt() {
+  async startAttempt(config) {
     const c = await loadCore();
     const run = this.state.run;
     const acct = await this.ltAccount();
@@ -737,14 +737,16 @@ class Studio {
     run.jobUrl = null;
     run.diagnosis = null;
     run.tail = "";
+    run.config = config || this.outputName();
+    run.targeted = run.config !== this.outputName();
     this.push();
     const ch = this.output();
-    ch.appendLine(`\n===== Attempt ${run.attempt} — ${new Date().toLocaleTimeString()} =====`);
+    ch.appendLine(`\n===== Attempt ${run.attempt}${run.targeted ? " (affected tests only)" : ""} — ${new Date().toLocaleTimeString()} =====`);
     let pending = "";
     const flush = () => { if (pending) { this.post({ type: "runLog", chunk: pending }); pending = ""; } };
     const timer = setInterval(flush, 400);
     const h = c.startRun({
-      cli, repoPath: this.state.repo, config: this.outputName(), username: acct.username, accessKey: acct.accessKey,
+      cli, repoPath: this.state.repo, config: run.config, username: acct.username, accessKey: acct.accessKey,
       onData: (s) => {
         ch.append(s);
         pending += s;
@@ -764,8 +766,8 @@ class Studio {
   async finishAttempt(r) {
     const c = await loadCore();
     const run = this.state.run;
-    const evidence = c.collectEvidence({ output: r.output, repoPath: this.state.repo, since: r.startedAt });
-    const yamlText = fs.readFileSync(path.join(this.state.repo, this.outputName()), "utf8");
+    const evidence = c.collectEvidence({ output: r.output, repoPath: this.state.repo, since: r.startedAt, artifactsDir: r.artifactsDir });
+    const yamlText = fs.readFileSync(path.join(this.state.repo, run.config || this.outputName()), "utf8");
     const d = c.diagnose({ evidence, yamlText, profile: this.state.profileFull, exitCode: r.exitCode, v02Name: c.v02FrameworkName(this.state.profileFull, this.state.profileFull.primaryFramework) });
     this.lastDiagnosis = d;
     this.lastEvidence = evidence;
@@ -773,11 +775,11 @@ class Studio {
     run.jobUrl = run.jobUrl || d.jobUrl;
     run.diagnosis = c.describeDiagnosis(d);
     run.logFiles = evidence.files;
-    const entry = { attempt: run.attempt, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [] };
+    const entry = { attempt: run.attempt, targeted: !!run.targeted, tests: d.tests, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [] };
     run.history.push(entry);
     this.push();
     if (r.stopped) return;
-    if (run.status === "fixable" && run.auto && d.canAutoFix) {
+    if (["fixable", "fixable-tests"].includes(run.status) && run.auto && d.canAutoFix) {
       if (run.attempt >= run.maxAttempts) {
         run.note = `Stopped after ${run.maxAttempts} attempts — review the diagnosis.`;
         return this.push();
@@ -789,16 +791,16 @@ class Studio {
   }
 
   // Apply the diagnosis's YAML fixes (or the AI's), save, and start the next attempt.
-  async applyRunFixes(ids, rerun) {
+  async applyRunFixes(ids, rerun, values = {}) {
     const c = await loadCore();
     const d = this.lastDiagnosis;
     if (!d) return;
     const run = this.state.run;
-    let r = c.applyDiagnosisFixes(this.state.yaml, d, ids);
+    let r = c.applyDiagnosisFixes(this.state.yaml, d, ids, values);
     if (Object.keys(r.options).length) {
       this.state.options = clean({ ...this.state.options, ...r.options });
       this.regenerate();
-      r = { ...c.applyDiagnosisFixes(this.state.yaml, d, d._fixes.filter((f) => f.patch && (!ids || ids.includes(f.id))).map((f) => f.id)), applied: r.applied };
+      r = { ...c.applyDiagnosisFixes(this.state.yaml, d, d._fixes.filter((f) => f.patch && (!ids || ids.includes(f.id))).map((f) => f.id), values), applied: r.applied };
     }
     this.state.yaml = r.yaml;
     this.state.dirty = true;
@@ -812,7 +814,23 @@ class Studio {
     await this.save(false);
     this.state.dirty = false;
     this.push();
-    if (rerun) await this.startAttempt();
+    if (!rerun) return;
+    // Only some tests failed for YAML reasons → rerun just those; code failures are left alone.
+    const sels = c.fixableSelectors(d, values);
+    if (d.status === "fixable-tests" && !d.fullRerunNeeded && sels.length) {
+      const rerunYaml = c.buildTargetedRerun({
+        fixedYaml: this.state.yaml,
+        selectors: sels,
+        profile: this.state.profileFull,
+        generate: (o) => c.generateYaml(this.state.profileFull, { ...this.state.options, ...o }).yaml,
+      });
+      if (rerunYaml) {
+        fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), rerunYaml);
+        run.history[run.history.length - 1].changes.push(`rerun only ${sels.length} affected test(s)`);
+        return this.startAttempt(".hyperexecute-rerun.yaml");
+      }
+    }
+    await this.startAttempt();
   }
 
   // No rule matched: ask the AI backend for a YAML change based on the log digest.
@@ -868,6 +886,17 @@ class Studio {
     await this.save(false);
     this.push();
     if (rerun) await this.startAttempt();
+  }
+
+  // Rerun every failed test as-is (e.g. to check flakiness) without changing the YAML.
+  buildFailedOnlyRerun() {
+    const d = this.lastDiagnosis;
+    const sels = d.tests.list.map((t) => t.selector).filter(Boolean);
+    if (!sels.length || !core) return undefined;
+    const y = core.buildTargetedRerun({ fixedYaml: this.state.yaml, selectors: sels, profile: this.state.profileFull, generate: (o) => core.generateYaml(this.state.profileFull, { ...this.state.options, ...o }).yaml });
+    if (!y) return undefined;
+    fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), y);
+    return ".hyperexecute-rerun.yaml";
   }
 
   stopRun() {

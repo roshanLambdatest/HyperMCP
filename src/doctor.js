@@ -4,14 +4,26 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { toSelector, testLabel, collectTestResults, parseResultFile } from "./results.js";
+
+function dedupeTests(tests) {
+  const m = new Map();
+  for (const t of tests) {
+    const k = t.format === "cucumber" ? `${t.uri}:${t.line}` : `${t.classname}|${t.name}`;
+    const prev = m.get(k);
+    if (!prev || prev.status !== "passed") m.set(k, t);
+  }
+  return [...m.values()];
+}
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 // ---------- collecting evidence ----------
 
 // Reads CLI output plus any log/report files the CLI downloaded during this run.
-export function collectEvidence({ output = "", repoPath, since }) {
+export function collectEvidence({ output = "", repoPath, since, artifactsDir }) {
   const files = [];
+  const resultFiles = [];
   if (repoPath && since) {
     const root = path.resolve(repoPath);
     const stack = [root];
@@ -28,7 +40,9 @@ export function collectEvidence({ output = "", repoPath, since }) {
         }
         let st;
         try { st = fs.statSync(full); } catch { continue; }
-        if (st.mtimeMs < since || !/\.(log|txt|json|xml|html?)$/i.test(e.name) || st.size > 2 * 1024 * 1024 || budget <= 0) continue;
+        if (st.mtimeMs < since) continue;
+        if (/\.(xml|json|trx)$/i.test(e.name)) resultFiles.push(full);
+        if (!/\.(log|txt|json|xml|html?)$/i.test(e.name) || st.size > 2 * 1024 * 1024 || budget <= 0) continue;
         const rel = path.relative(root, full).split(path.sep).join("/");
         if (/^src\/|\/src\//.test(rel) || rel === "hyperexecute.yaml") continue;
         const text = fs.readFileSync(full, "utf8").slice(0, budget);
@@ -38,8 +52,12 @@ export function collectEvidence({ output = "", repoPath, since }) {
     }
   }
   const all = [output, ...files.map((f) => `\n===== ${f.file} =====\n${f.text}`)].join("\n");
+  // Per-test results from the downloaded artifacts plus any report written into the repo during the run.
+  const tests = collectTestResults([artifactsDir]);
+  for (const f of resultFiles) for (const t of parseResultFile(f)) tests.push(t);
   return {
     text: all,
+    tests: dedupeTests(tests),
     files: files.map((f) => f.file),
     jobId: (all.match(/jobId[=:"\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i) || all.match(/job[ _-]?id\W+([\w-]{8,})/i) || [])[1] || null,
     jobUrl: (all.match(/https:\/\/[\w.-]*(?:hyperexecute|lambdatest|testmuai)[\w.-]*\/[^\s"')]*job[^\s"')]*/i) || [])[0] || null,
@@ -114,7 +132,7 @@ const RULES = [
   },
   {
     id: "private-network", category: "network",
-    re: /(UnknownHostException|ENOTFOUND|getaddrinfo EAI_AGAIN|ERR_NAME_NOT_RESOLVED|Could not resolve host|ERR_CONNECTION_REFUSED|ECONNREFUSED|ERR_CONNECTION_TIMED_OUT|net::ERR_ADDRESS_UNREACHABLE|Name or service not known)/i,
+    re: /\bUnknownHostException\b|\bENOTFOUND\b|getaddrinfo EAI_AGAIN|\bERR_NAME_NOT_RESOLVED\b|[Cc]ould not resolve host|\bERR_CONNECTION_REFUSED\b|\bECONNREFUSED\b|\bERR_CONNECTION_TIMED_OUT\b|net::ERR_ADDRESS_UNREACHABLE|[Nn]ame or service not known/,
     title: "Tests can't reach the application (private network)",
     why: "The app or a dependency host isn't reachable from HyperExecute VMs — typical for staging/internal URLs.",
     fix: (ctx) => (ctx.js.tunnel ? null : { patch: (d) => d.set("tunnel", true), summary: "Enabled tunnel: true" }),
@@ -260,11 +278,28 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
     try { fix = r.fix ? r.fix(ctx) : null; } catch { fix = null; }
     found.push({ id: r.id, category: r.category, title: r.title, why: r.why, advice: r.advice || null, evidence: excerpt(text, r.re), fix, stop: !!r.stop, notYaml: !!r.notYaml });
   }
+  // Per-test classification when the job produced reports.
+  const tests = evidence.tests || [];
+  const classified = tests.length ? classifyTests(tests, { yamlText, profile }) : [];
+  if (tests.length) {
+    const i = found.findIndex((f) => f.id === "test-failures");
+    if (i >= 0) found.splice(i, 1); // real per-test data beats the log regex
+  }
+  const testFixes = [];
+  for (const c of classified) if (c.fix && !testFixes.some((f) => f.key === c.fix.key)) testFixes.push(c.fix);
+  const yamlTests = classified.filter((c) => c.cause === "yaml" && c.fix);
+  const affected = yamlTests.map((c) => ({ c, sel: toSelector(c.test, profile, js) })).filter((x) => x.sel);
   const yamlFixes = found.filter((f) => f.fix);
+  const failed = classified.length;
+  const needsValue = [...new Set(yamlTests.map((c) => c.fix.needsValue).filter(Boolean))];
   const status =
-    exitCode === 0 && !found.some((f) => f.id !== "test-failures") ? (found.length ? "passed-with-failures" : "passed") :
     found.some((f) => f.id === "cli-auth") ? "auth-error" :
     yamlFixes.length ? "fixable" :
+    yamlTests.length && yamlTests.every((c) => c.fix.needsValue) ? "needs-input" :
+    yamlTests.length ? "fixable-tests" :
+    failed && classified.every((c) => c.cause === "code") ? "test-failures" :
+    failed ? "needs-attention" :
+    exitCode === 0 && !found.some((f) => f.id !== "test-failures") ? (found.length ? "passed-with-failures" : "passed") :
     found.some((f) => f.notYaml) ? "test-failures" :
     found.length ? "needs-attention" : "unknown";
   return {
@@ -272,21 +307,35 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
     jobId: evidence.jobId,
     jobUrl: evidence.jobUrl,
     diagnoses: found.map(({ fix, ...f }) => ({ ...f, fixSummary: fix?.summary || null, fixType: fix ? (fix.options ? "regenerate" : "patch") : null })),
-    canAutoFix: yamlFixes.length > 0 && !found.some((f) => f.stop && !f.notYaml),
-    _fixes: yamlFixes.map((f) => ({ id: f.id, ...f.fix })),
+    canAutoFix: (yamlFixes.length > 0 || yamlTests.some((c) => !c.fix.needsValue)) && !found.some((f) => f.stop && !f.notYaml),
+    tests: {
+      total: tests.length,
+      passed: tests.filter((t) => t.status === "passed").length,
+      failed,
+      code: classified.filter((c) => c.cause === "code").length,
+      yaml: classified.filter((c) => c.cause === "yaml").length,
+      unknown: classified.filter((c) => c.cause === "unknown").length,
+      list: classified.map((c) => ({ label: testLabel(c.test), selector: toSelector(c.test, profile, js)?.selector || null, cause: c.cause, rule: c.rule, reason: c.reason, fix: c.fix?.summary || null, fixKey: c.fix?.key || null, needsValue: c.fix?.needsValue || null, note: c.note, evidence: c.evidence })),
+    },
+    needsValue,
+    rerunSelectors: affected.map((x) => x.sel.selector),
+    rerunLevels: affected.map((x) => x.sel.level),
+    fullRerunNeeded: yamlFixes.length > 0 || (yamlTests.length > 0 && affected.length < yamlTests.length),
+    _fixes: [...yamlFixes.map((f) => ({ id: f.id, ...f.fix })), ...testFixes.map((f) => ({ id: f.key, ...f }))],
   };
 }
 
 // Applies the YAML fixes from a diagnosis. Returns {yaml, options, applied}; `options` are generator
 // options to regenerate with (the caller regenerates, then re-applies patches).
-export function applyDiagnosisFixes(yamlText, diagnosis, ids) {
+export function applyDiagnosisFixes(yamlText, diagnosis, ids, values = {}) {
   const doc = YAML.parseDocument(yamlText);
   const options = {};
   const applied = [];
   for (const f of diagnosis._fixes.filter((x) => !ids || ids.includes(x.id))) {
+    if (f.needsValue && !values[f.needsValue]) continue; // never invent a value
     if (f.options) Object.assign(options, f.options);
-    if (f.patch) f.patch(doc, doc.toJS());
-    applied.push(f.summary);
+    if (f.patch) f.patch(doc, f.needsValue ? values : doc.toJS());
+    applied.push(f.needsValue ? "Set env " + f.needsValue : f.summary);
   }
   return { yaml: doc.toString({ lineWidth: 0 }), options, applied };
 }
@@ -300,3 +349,128 @@ export function logDigest(text, max = 6000) {
 }
 
 export const describeDiagnosis = ({ _fixes, ...d }) => d;
+
+// ======================= per-test classification =======================
+// Each failed test is classified as a code problem (leave it), a YAML/environment problem (fix the YAML
+// and rerun just that test), or unknown. Order matters: environment signals win over generic ones.
+
+const SECRET_LIKE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|USERNAME|CREDENTIAL|AUTH)/i;
+
+const TEST_RULES = [
+  { id: "network", cause: "yaml", re: /\bUnknownHostException\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bERR_NAME_NOT_RESOLVED\b|\bECONNREFUSED\b|\bERR_CONNECTION_REFUSED\b|\bERR_CONNECTION_TIMED_OUT\b|\bERR_ADDRESS_UNREACHABLE\b|[Cc]ould not resolve host|[Nn]ame or service not known|[Cc]onnection refused/,
+    reason: "The app/host isn't reachable from the HyperExecute VM (private or staging network).",
+    fix: (ctx) => (ctx.js.tunnel ? { none: "tunnel is already on — check the tunnel is running and can reach the host" } : { key: "tunnel", summary: "Enable tunnel: true", patch: (d) => d.set("tunnel", true) }) },
+  { id: "grid-auth", cause: "yaml", re: /(hub|cdp)\.lambdatest\.com[^\n]*(401|Unauthorized)|Unauthorized[^\n]*lambdatest|Invalid (LambdaTest )?username or access ?key/i,
+    reason: "The test couldn't log in to the LambdaTest grid — LT_USERNAME / LT_ACCESS_KEY aren't reaching it.",
+    fix: (ctx) => (ctx.js.env?.LT_USERNAME && ctx.js.env?.LT_ACCESS_KEY ? { none: "Create secrets LT_USERNAME / LT_ACCESS_KEY in HyperExecute for your account" } : { key: "lt-secrets", summary: "Map LT_USERNAME / LT_ACCESS_KEY from HyperExecute secrets", patch: (d) => { d.setIn(["env", "LT_USERNAME"], "${{ .secrets.LT_USERNAME }}"); d.setIn(["env", "LT_ACCESS_KEY"], "${{ .secrets.LT_ACCESS_KEY }}"); } }) },
+  { id: "grid-capacity", cause: "yaml", re: /queue timeout|too many (concurrent )?(sessions|requests)|concurrency limit|exceeded (the )?(allowed )?parallel/i,
+    reason: "The grid rejected the session because too many ran at once.",
+    fix: (ctx) => { const n = Math.max(1, Math.floor((ctx.js.concurrency || 2) / 2)); return { key: "concurrency", summary: `Lower concurrency to ${n}`, patch: (d) => d.set("concurrency", n) }; } },
+  { id: "env-missing", cause: "yaml",
+    re: /environment variable[ "'`]*(\w+)[ "'`]*(is )?(not set|missing|undefined|required)|Missing (required )?env(ironment)? var(iable)?[:\s"'`]+(\w+)|KeyError: '(\w+)'[\s\S]{0,400}(os\.environ|getenv)|os\.environ\[['"](\w+)['"]\][\s\S]{0,200}KeyError|process\.env\.(\w+)[^\n]*(undefined|null)|System\.getenv\("(\w+)"\)[^\n]*null|because the return value of "java\.lang\.System\.getenv\(String\)" is null/i,
+    reason: "The test reads an environment variable the job doesn't provide.",
+    fix: (ctx, t, m) => {
+      const text = `${t.message}\n${t.detail}`;
+      let name = m.slice(1).find((g) => g && /^[A-Z][A-Z0-9_]{2,}$/.test(g));
+      if (!name) { const g = text.match(/getenv\("(\w+)"\)|process\.env\.(\w+)|os\.environ(?:\.get)?\(?\[?['"](\w+)['"]/); name = g && (g[1] || g[2] || g[3]); }
+      if (!name) name = ctx.placeholders[0];
+      if (!name) return { none: "Couldn't tell which variable — check the test's environment lookups" };
+      return envFix(ctx, name);
+    } },
+  { id: "url-missing", cause: "yaml", re: /MalformedURLException: no protocol: (null|undefined|$)|Cannot navigate to invalid URL|invalid URL[^\n]*(null|undefined)|page\.goto: (url: expected string|Protocol error .*Cannot navigate to invalid URL)|TypeError: Invalid URL[\s\S]{0,80}(undefined|null)/i,
+    reason: "The test opened an empty/undefined URL — usually a base-URL environment variable that the job doesn't set.",
+    fix: (ctx) => { const name = ctx.placeholders.find((v) => /URL|HOST|ENDPOINT|DOMAIN/i.test(v)) || ctx.envVars.find((v) => /URL|HOST/i.test(v) && !(ctx.js.env || {})[v]); return name ? envFix(ctx, name) : { none: "Set the base URL the tests expect in env" }; } },
+  { id: "browsers", cause: "yaml", re: /Executable doesn't exist at .*ms-playwright|browserType\.launch: Executable doesn't exist|please run the following command to download new browsers/i,
+    reason: "Playwright's browsers aren't installed on the VM.",
+    fix: (ctx) => { const cmd = ctx.profile?.language === "python" ? "python3 -m playwright install" : "npx playwright install"; return (ctx.js.pre || []).some((c) => /playwright install/.test(c)) ? { none: "playwright install already runs in pre" } : { key: "pw-install", summary: `Add ${cmd} to pre`, pre: cmd, patch: (d) => d.set("pre", [...(d.toJS().pre || []), cmd]) }; } },
+  { id: "oom", cause: "yaml", re: /OutOfMemoryError|Java heap space|GC overhead limit|JavaScript heap out of memory|ENOMEM/i,
+    reason: "The VM ran out of memory while running this test.",
+    fix: (ctx, t) => (/JavaScript heap/.test(`${t.message}${t.detail}`) ? { key: "node-mem", summary: "Set NODE_OPTIONS=--max-old-space-size=4096", patch: (d) => d.setIn(["env", "NODE_OPTIONS"], "--max-old-space-size=4096") } : { key: "java-mem", summary: "Set MAVEN_OPTS=-Xmx3g", patch: (d) => d.setIn(["env", "MAVEN_OPTS"], "-Xmx3g") }) },
+  { id: "py-module", cause: "yaml", re: /ModuleNotFoundError: No module named '([\w.]+)'/,
+    reason: "A Python package the test imports isn't installed on the VM.",
+    fix: (ctx, t, m) => {
+      const mod = m[1].split(".")[0];
+      if (ctx.profile?.repoPath && (fs.existsSync(path.join(ctx.profile.repoPath, mod)) || fs.existsSync(path.join(ctx.profile.repoPath, mod + ".py")))) return { none: `${mod} is a local module — check PYTHONPATH / imports` };
+      const cmd = `pip3 install ${mod} --cache-dir pip_cache`;
+      return { key: `pip-${mod}`, summary: `Add "${cmd}" to pre (and add ${mod} to requirements.txt)`, pre: cmd, patch: (d) => d.set("pre", [...(d.toJS().pre || []), cmd]) };
+    } },
+  { id: "session", cause: "yaml", re: /SessionNotCreatedException|Could not start a new session|Unable to create (a )?new (remote )?session|cannot find (Chrome|Firefox) binary|This version of ChromeDriver only supports/i,
+    reason: "The browser session couldn't start (driver/browser mismatch or unsupported capability).",
+    fix: () => ({ none: "Check the browser/version/platform capabilities (Grid tab) or driver setup" }) },
+  // ---- code problems: leave them alone ----
+  { id: "assertion", cause: "code", re: /AssertionError|AssertionFailedError|ComparisonFailure|expected:? ?\[?<?[^\n]*?>?\]? but (was|found)|expect\(.*\)\.(to|not)|Expected: .*\n\s*Received|assert .* ==|\bAssert\.(That|AreEqual|IsTrue)|should (equal|be|have)|Expected condition failed/i,
+    reason: "An assertion failed — the app behaved differently than the test expects." },
+  { id: "locator", cause: "code", re: /NoSuchElementException|Unable to locate element|ElementNotInteractableException|ElementClickInterceptedException|StaleElementReferenceException|waiting for (locator|selector)|locator\.\w+: Timeout|strict mode violation|no such element/i,
+    reason: "An element lookup failed — a locator/page change or a timing issue in the test." },
+  { id: "undefined-step", cause: "code", re: /undefined-step|is undefined|You can implement missing steps|Undefined step/i,
+    reason: "A Cucumber step has no step definition." },
+  { id: "local-path", cause: "code", re: /(FileNotFoundException|ENOENT|No such file or directory)[^\n]*([A-Za-z]:\\|\/Users\/|\/home\/(?!ltuser))/i,
+    reason: "The test uses a path from someone's machine — make it relative to the repo." },
+  { id: "compile", cause: "code", re: /cannot find symbol|COMPILATION ERROR|SyntaxError|IndentationError|error CS\d{4}|TS\d{4}:/i,
+    reason: "The test code doesn't compile." },
+  { id: "runtime-error", cause: "code", re: /NullPointerException|TypeError|AttributeError|ReferenceError|IndexOutOfBounds|ArgumentException|InvalidOperationException/i,
+    reason: "The test code threw an error." },
+];
+
+function envFix(ctx, name) {
+  const env = ctx.js.env || {};
+  const cur = env[name];
+  if (cur && !String(cur).startsWith("<set ")) return { none: `${name} is set in the YAML (${String(cur).includes("secrets") ? "from a secret — check the secret exists" : "check its value"})` };
+  if (SECRET_LIKE.test(name)) return { key: `env-${name}`, summary: `Map ${name} from HyperExecute secret ${name}`, patch: (d) => d.setIn(["env", name], `\${{ .secrets.${name} }}`) };
+  return { key: `env-${name}`, summary: `Set env ${name}`, needsValue: name, patch: (d, values) => values?.[name] && d.setIn(["env", name], values[name]) };
+}
+
+export function classifyTests(tests, { yamlText, profile }) {
+  const js = YAML.parse(yamlText || "") || {};
+  const envVars = profile?.envVars || [];
+  const ctx = { js, profile, envVars, placeholders: Object.entries(js.env || {}).filter(([, v]) => String(v).startsWith("<set ")).map(([k]) => k) };
+  return tests.filter((t) => t.status === "failed").map((t) => {
+    const text = `${t.kind === "undefined-step" ? "undefined-step\n" : ""}${t.message}\n${t.detail}`;
+    for (const r of TEST_RULES) {
+      const m = text.match(r.re);
+      if (!m) continue;
+      const fx = r.fix ? r.fix(ctx, t, m) : null;
+      return { test: t, cause: r.cause, rule: r.id, reason: r.reason, fix: fx && !fx.none ? fx : null, note: fx?.none || null, evidence: (t.message || t.detail.split("\n")[0] || "").slice(0, 300) };
+    }
+    return { test: t, cause: "unknown", rule: null, reason: "Not a pattern I recognize.", fix: null, note: null, evidence: (t.message || t.detail.split("\n")[0] || "").slice(0, 300) };
+  });
+}
+
+// Rerun only the given tests: keeps the fixed YAML's settings, restricts discovery to the selectors.
+export function buildTargetedRerun({ fixedYaml, selectors, profile, generate }) {
+  const doc = YAML.parseDocument(fixedYaml);
+  const js = doc.toJS() || {};
+  const list = [...new Set(selectors)];
+  const win = process.platform === "win32";
+  const discovery = win ? list.map((s) => `echo ${s}`).join("&& ") : `printf '%s\\n' ${list.map((s) => `'${s.replace(/'/g, "'\\''")}'`).join(" ")}`;
+  const conc = Math.max(1, Math.min(list.length, js.concurrency || list.length));
+  const tag = (d) => { d.set("jobLabel", [...new Set([...(js.jobLabel || []), "rerun-failed"])]); d.set("concurrency", conc); };
+  if (String(js.version) !== "0.2" && js.autosplit && /\$test/.test(js.testRunnerCommand || "")) {
+    doc.set("testDiscovery", { type: "raw", mode: "local", command: discovery });
+    tag(doc);
+    return doc.toString({ lineWidth: 0 });
+  }
+  if (js.matrix && Array.isArray(js.matrix.test)) {
+    doc.setIn(["matrix", "test"], list);
+    tag(doc);
+    return doc.toString({ lineWidth: 0 });
+  }
+  // v0.2 or tag-based matrix: build a v0.1 autosplit YAML for just these tests, carrying the fixes over.
+  if (!generate) return null;
+  const level = selectors.levels?.[0];
+  const splitBy = { method: profile.language === "python" ? "method" : "method", class: "class", scenario: "scenario", file: "file" }[level] || undefined;
+  const base = YAML.parseDocument(generate({ yamlVersion: "0.1", executionMode: "autosplit", splitBy, discoveryCommand: discovery, runson: js.runson, concurrency: conc }));
+  for (const k of ["env", "tunnel", "runtime", "idleTimeout", "globalTimeout", "testSuiteTimeout", "testSuiteStep"]) if (js[k] !== undefined) base.set(k, js[k]);
+  const extraPre = (js.pre || []).filter((c) => /chmod \+x|playwright install|pip3? install [^-]/.test(c));
+  if (extraPre.length) base.set("pre", [...new Set([...(base.toJS().pre || []), ...extraPre])]);
+  base.setIn(["testDiscovery", "mode"], "local");
+  base.set("jobLabel", ["rerun-failed"]);
+  return base.toString({ lineWidth: 0 });
+}
+
+// Tests whose YAML fix will actually be applied (a fix needing a value the user hasn't given is skipped).
+export function fixableSelectors(diagnosis, values = {}) {
+  const list = (diagnosis.tests?.list || []).filter((t) => t.cause === "yaml" && t.fixKey && t.selector && (!t.needsValue || values[t.needsValue]));
+  const levels = list.map((t) => (t.selector.includes("::") ? "method" : /\.feature:\d+$/.test(t.selector) ? "scenario" : /#/.test(t.selector) ? "method" : /\//.test(t.selector) ? "file" : "class"));
+  return Object.assign(list.map((t) => t.selector), { levels });
+}

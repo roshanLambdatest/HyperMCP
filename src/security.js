@@ -42,6 +42,24 @@ const assignRe = (keys) => new RegExp(`(["']?)(${keys})\\1(\\s*(?:=|:|=>)\\s*)([
 // getenv("LT_USERNAME", "fallback") / process.env.LT_USERNAME || "fallback" / getOrDefault("LT_USERNAME","x")
 const FALLBACK_RE = /(?:System\.getenv\(\)\.getOrDefault|(?:os\.)?getenv|(?:os\.)?environ\.get)\(\s*["'](LT_USERNAME|LT_ACCESS_KEY)["']\s*,\s*["']([^"']+)["']\s*\)|process\.env\.(LT_USERNAME|LT_ACCESS_KEY)\s*(?:\|\||\?\?)\s*["'`]([^"'`]+)["'`]/g;
 
+// Guards against rewriting ordinary code (a real incident: `cond ? "username" : "access-key"` was
+// taken for an assignment and replaced).
+const STOP_WORDS = /^(user(name)?|e-?mail|pass(word)?|access[-_ ]?key|key|token|secret|name|login|guest|test(user)?|string|null|none|admin|value|id|text|label|field|input)$/i;
+const looksLikeUsername = (v) => /^[A-Za-z0-9][A-Za-z0-9._@+-]{2,63}$/.test(v) && !STOP_WORDS.test(v);
+const looksLikeAccessKey = (v) => /^[A-Za-z0-9_]{20,}$/.test(v);
+function lineAt(text, index) {
+  const start = text.lastIndexOf("\n", index - 1) + 1;
+  const end = text.indexOf("\n", index);
+  return { before: text.slice(start, index), line: text.slice(start, end < 0 ? text.length : end) };
+}
+function isCommentOrTernary(text, index, sep) {
+  const { before, line } = lineAt(text, index);
+  if (/^\s*(\/\/|#|\*|\/\*|<!--|--|;|REM\b)/.test(line)) return true; // comment line
+  if (/\/\/|\/\*|(^|\s)#\s/.test(before)) return true; // trailing comment before the match
+  if (sep && sep.trim() === ":" && /\?[^:]*$/.test(before)) return true; // cond ? "a" : "b"
+  return false;
+}
+
 function lineOf(text, index) {
   return text.slice(0, index).split("\n").length;
 }
@@ -59,24 +77,28 @@ export function scanCredentials(repoPath) {
 
     for (const m of text.matchAll(HUB_CREDS)) {
       if (isPlaceholder(m[2]) && isPlaceholder(m[3])) continue;
+      if (!looksLikeAccessKey(m[3]) || isCommentOrTernary(text, m.index)) continue;
       push({ line: lineOf(text, m.index), kind: "hub-url", username: mask(m[2]), accessKey: mask(m[3]), match: m[0], index: m.index, autoFix: lang !== "config" });
     }
     for (const m of text.matchAll(FALLBACK_RE)) {
       const name = m[1] || m[3];
       const value = m[2] || m[4];
-      if (isPlaceholder(value)) continue;
+      if (isPlaceholder(value) || isCommentOrTernary(text, m.index)) continue;
+      if (name === "LT_ACCESS_KEY" ? !looksLikeAccessKey(value) : !looksLikeUsername(value)) continue;
       push({ line: lineOf(text, m.index), kind: "env-fallback", variable: name, value: mask(value), match: m[0], index: m.index, autoFix: lang !== "config" });
     }
     if (!mentionsLT) continue; // username/accessKey-style names only count in LambdaTest-related files
     // ltOptions.put("username", "x") / caps.setCapability("accessKey", "x") / lt_options["user"] = "x"
     for (const m of text.matchAll(/(?:\.(?:put|setCapability|set_capability|Add|AddAdditionalOption|AddAdditionalCapability)\(\s*|\[\s*)["'](username|user|userName|accessKey|access_key|accesskey)["']\s*(?:,|\]\s*=)\s*(["'])([^"']+)\2/g)) {
       const kind = /^user/i.test(m[1]) ? "username" : "access-key";
-      if (isPlaceholder(m[3])) continue;
+      if (isPlaceholder(m[3]) || isCommentOrTernary(text, m.index)) continue;
+      if (kind === "username" ? !looksLikeUsername(m[3]) : !looksLikeAccessKey(m[3])) continue;
       push({ line: lineOf(text, m.index), kind, key: m[1], value: mask(m[3]), match: m[0], index: m.index, quote: m[2], autoFix: lang !== "config" });
     }
     if (/hostname\s*:\s*["'][^"']*(lambdatest|testmuai)/.test(text)) {
       for (const m of text.matchAll(/\b(user|key)(\s*:\s*)(["'])([^"']+)\3/g)) {
-        if (isPlaceholder(m[4]) || findings.some((f) => f.file === rel && f.index === m.index)) continue;
+        if (isPlaceholder(m[4]) || findings.some((f) => f.file === rel && f.index === m.index) || isCommentOrTernary(text, m.index, m[2])) continue;
+        if (m[1] === "user" ? !looksLikeUsername(m[4]) : !looksLikeAccessKey(m[4])) continue;
         push({ line: lineOf(text, m.index), kind: m[1] === "user" ? "username" : "access-key", key: m[1], value: mask(m[4]), match: m[0], index: m.index, quote: m[3], autoFix: lang !== "config", confidence: "high" });
       }
     }
@@ -89,8 +111,9 @@ export function scanCredentials(repoPath) {
       for (const m of text.matchAll(assignRe(keys))) {
         const value = m[5];
         if (isPlaceholder(value) || /^(true|false|null|none|undefined|\d+)$/i.test(value)) continue;
-        if (kind === "access-key" && value.length < 12) continue; // access keys are long
-        if (kind === "username" && (value.length > 64 || /[()]/.test(value))) continue;
+        if (lang !== "config" && !m[4]) continue; // in code a literal is always quoted; unquoted = variable/expression
+        if (kind === "access-key" ? !looksLikeAccessKey(value) : !looksLikeUsername(value)) continue;
+        if (isCommentOrTernary(text, m.index, m[3])) continue;
         if (findings.some((f) => f.file === rel && f.index <= m.index && m.index < f.index + f.match.length)) continue;
         const isExplicit = explicit.test(m[2]);
         const wired = new RegExp(`\\b${m[2].replace(/[.]/g, "\\.")}\\b`).test(ltLines);

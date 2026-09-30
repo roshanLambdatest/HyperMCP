@@ -484,6 +484,8 @@
     passed: ["good", "✓ Passed"],
     "passed-with-failures": ["warn", "Finished — some tests failed"],
     fixable: ["warn", "Failed — fixable in the YAML"],
+    "fixable-tests": ["warn", "Some tests failed for YAML reasons"],
+    "needs-input": ["warn", "Tests need an environment value"],
     "test-failures": ["bad", "Tests failed — not a YAML problem"],
     "auth-error": ["bad", "LambdaTest login failed"],
     "needs-attention": ["warn", "Failed — needs your attention"],
@@ -516,11 +518,23 @@
 
     const d = r.diagnosis;
     let html = "";
+    if (d && !running && d.tests?.failed) {
+      const t = d.tests;
+      const pill = { code: "bad", yaml: "warn", unknown: "muted" };
+      const causeLabel = { code: "Code", yaml: "YAML", unknown: "?" };
+      html += `<div class="small"><b>${t.failed} failed</b> of ${t.total}: ${t.code} code (left alone) · ${t.yaml} YAML/environment${t.unknown ? ` · ${t.unknown} unrecognized` : ""}</div>`;
+      html += `<ul class="findings tests">${t.list.map((x) => `<li><span class="pill ${pill[x.cause]}">${causeLabel[x.cause]}</span> <b>${esc(x.label)}</b><div class="small muted">${esc(x.reason)}</div>${x.fix ? `<div class="small ok">→ ${esc(x.fix)}</div>` : ""}${x.needsValue ? `<div class="field"><label for="val-${esc(x.needsValue)}">Value for ${esc(x.needsValue)}</label><input type="text" class="needs-value" id="val-${esc(x.needsValue)}" data-name="${esc(x.needsValue)}" placeholder="e.g. https://…"></div>` : ""}${x.note ? `<div class="small">${esc(x.note)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Error</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`;
+    }
     if (d && !running) {
       html += d.diagnoses.length
         ? `<ul class="findings">${d.diagnoses.map((x) => `<li><b>${esc(x.title)}</b><div class="small muted">${esc(x.why)}</div>${x.fixSummary ? `<div class="small ok">→ Fix: ${esc(x.fixSummary)}</div>` : ""}${x.advice ? `<div class="small">${esc(x.advice)}</div>` : ""}${x.evidence ? `<details><summary class="small muted">Evidence</summary><pre class="cmd">${esc(x.evidence)}</pre></details>` : ""}</li>`).join("")}</ul>`
         : r.status !== "passed" ? `<div class="small muted">No known failure pattern matched${r.logFiles?.length ? ` in the output and ${r.logFiles.length} downloaded log file(s)` : ""}.</div>` : "";
       const btns = [];
+      if (["fixable-tests", "needs-input"].includes(r.status)) {
+        const n = (d.tests?.list || []).filter((x) => x.cause === "yaml" && x.fixKey).length;
+        btns.push(`<button class="btn primary" id="runFixTests">Fix YAML &amp; rerun ${n} affected test${n === 1 ? "" : "s"}</button>`);
+      }
+      if ((d.tests?.failed || 0) > 0) btns.push(`<button class="btn ghost" id="runFailedOnly" title="Rerun the failed tests without changing the YAML">Rerun failed as-is</button>`);
       if (r.status === "fixable") btns.push(`<button class="btn primary" id="runFix">Apply fixes &amp; rerun</button>`, `<button class="btn ghost" id="runFixOnly">Apply only</button>`);
       if (["unknown", "needs-attention", "fixable"].includes(r.status)) btns.push(`<button class="btn ${r.status === "fixable" ? "ghost" : "primary"}" id="runAskAI">Ask AI to fix</button>`);
       if (r.status !== "running") btns.push(`<button class="btn ghost" id="runAgain">Rerun</button>`);
@@ -534,10 +548,17 @@
       }</div>`;
     }
     if (r.note) html += `<div class="small warn">${esc(r.note)}</div>`;
-    if (r.history?.length) html += `<div class="hist"><div class="small muted">Attempts</div>${r.history.map((h) => `<div class="small">#${h.attempt} <span class="${(STATUS[h.status] || ["muted"])[0]}">${esc((STATUS[h.status] || ["", h.status])[1])}</span> · ${fmtDur(h.durationSec)}${h.changes.length ? ` → ${esc(h.changes.join("; "))}` : ""}</div>`).join("")}</div>`;
+    if (r.history?.length) html += `<div class="hist"><div class="small muted">Attempts</div>${r.history.map((h) => `<div class="small">#${h.attempt}${h.targeted ? " (affected tests)" : ""} <span class="${(STATUS[h.status] || ["muted"])[0]}">${esc((STATUS[h.status] || ["", h.status])[1])}</span> · ${fmtDur(h.durationSec)}${h.changes.length ? ` → ${esc(h.changes.join("; "))}` : ""}</div>`).join("")}</div>`;
     $("#runDiag").innerHTML = html;
     const on = (id, fn) => { const el = $("#" + id); if (el) el.onclick = fn; };
     on("runFix", () => { runLog.textContent = ""; send("runApplyFixes", { rerun: true }); });
+    on("runFixTests", () => {
+      const values = {};
+      document.querySelectorAll(".needs-value").forEach((i) => { if (i.value.trim()) values[i.dataset.name] = i.value.trim(); });
+      runLog.textContent = "";
+      send("runApplyFixes", { rerun: true, values });
+    });
+    on("runFailedOnly", () => { runLog.textContent = ""; send("runRerun", { onlyFailed: true }); });
     on("runFixOnly", () => send("runApplyFixes", { rerun: false }));
     on("runAskAI", () => send("runAskAI"));
     on("runAgain", () => { runLog.textContent = ""; send("runRerun"); });

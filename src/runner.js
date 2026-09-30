@@ -34,10 +34,12 @@ export async function ensureCli(repoPath, { download = true } = {}) {
 
 // Starts a run. onData(chunk) streams output. Returns {promise, stop}; promise resolves to
 // {exitCode, output, startedAt, finishedAt, stopped}.
-export function startRun({ cli, repoPath, config = "hyperexecute.yaml", username, accessKey, onData = () => {}, extraArgs = [] }) {
+export function startRun({ cli, repoPath, config = "hyperexecute.yaml", username, accessKey, onData = () => {}, extraArgs = [], artifactsDir }) {
+  // Reports (JUnit XML, Cucumber JSON, TRX…) come back as artifacts; keep them outside the customer repo.
+  artifactsDir = artifactsDir || fs.mkdtempSync(path.join(os.tmpdir(), "he-artifacts-"));
   if (!username || !accessKey) throw new Error("LambdaTest username and access key are required (LT_USERNAME / LT_ACCESS_KEY).");
   const startedAt = Date.now();
-  const args = ["--config", config, "--download-logs", "--download-report", ...extraArgs];
+  const args = ["--config", config, "--download-logs", "--download-report", "--download-artifacts", "--download-artifacts-path", artifactsDir, ...extraArgs];
   const child = spawn(cli, args, {
     cwd: repoPath,
     env: { ...process.env, LT_USERNAME: username, LT_ACCESS_KEY: accessKey },
@@ -55,12 +57,13 @@ export function startRun({ cli, repoPath, config = "hyperexecute.yaml", username
   child.stdout.on("data", take);
   child.stderr.on("data", take);
   const promise = new Promise((resolve) => {
-    child.on("error", (e) => { take(Buffer.from(`\n[runner] failed to start CLI: ${e.message}\n`)); resolve({ exitCode: -1, output, startedAt, finishedAt: Date.now(), stopped }); });
-    child.on("close", (code) => resolve({ exitCode: code ?? -1, output, startedAt, finishedAt: Date.now(), stopped }));
+    child.on("error", (e) => { take(Buffer.from(`\n[runner] failed to start CLI: ${e.message}\n`)); resolve({ exitCode: -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }); });
+    child.on("close", (code) => resolve({ exitCode: code ?? -1, output, startedAt, finishedAt: Date.now(), stopped, artifactsDir }));
   });
   return {
     promise,
     pid: child.pid,
+    artifactsDir,
     stop: () => { stopped = true; try { child.kill("SIGINT"); setTimeout(() => child.kill("SIGKILL"), 5000); } catch {} },
   };
 }

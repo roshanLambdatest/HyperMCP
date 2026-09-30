@@ -18,7 +18,7 @@ Reads a test-automation repo, detects its stack, and generates, validates and dr
 | `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
 | `run_hyperexecute_job` | Starts a watched job with the CLI (downloaded automatically) using `LT_USERNAME` / `LT_ACCESS_KEY` from the server env; returns a runId |
 | `get_hyperexecute_run` | Live log tail while running; when finished, a diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed YAML fixes |
-| `fix_and_rerun_hyperexecute` | Applies the diagnosis fixes (or your YAML), validates, writes, and starts the next attempt. Refuses for test failures, login errors, or after max attempts |
+| `fix_and_rerun_hyperexecute` | Applies the diagnosis fixes (or your YAML), validates, writes, and starts the next attempt. Per test: code failures are left alone; tests that failed for YAML/environment reasons get the fix and are rerun on their own. Takes `values` for env vars the tests need. Refuses for code-only failures, login errors, or after max attempts |
 | `diagnose_hyperexecute_logs` | Diagnoses pasted logs or a downloaded log folder and returns the corrected YAML |
 
 Prompt: `create_hyperexecute_yaml` runs the whole workflow.

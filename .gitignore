@@ -6,3 +6,6 @@ vscode-extension/core/
 vscode-extension/knowledge/
 # another VS Code extension's local hooks
 .github/modernize/
+target/
+.fake-runs
+.hyperexecute-rerun.yaml

@@ -11,7 +11,7 @@ import YAML from "yaml";
 import { analyzeRepo, summarizeProfile } from "./analyzer.js";
 import { generateYaml, v02FrameworkName } from "./generator.js";
 import { ensureCli, startRun } from "./runner.js";
-import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis } from "./doctor.js";
+import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis, buildTargetedRerun, fixableSelectors } from "./doctor.js";
 import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS } from "./knowledge.js";
 import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
@@ -19,7 +19,7 @@ import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } 
 import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 
-const server = new McpServer({ name: "hyperexecute-yaml", version: "1.4.0" });
+const server = new McpServer({ name: "hyperexecute-yaml", version: "1.5.0" });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
@@ -411,16 +411,16 @@ function ltCreds() {
   return { username, accessKey };
 }
 
-async function launch(repo, config, attempt, parent) {
+async function launch(repo, config, attempt, parent, mainConfig = config) {
   const { username, accessKey } = ltCreds();
   const cli = await ensureCli(repo);
   const id = `run-${Date.now().toString(36)}`;
-  const rec = { id, repo, config, attempt, parent, status: "running", tail: "", startedAt: Date.now(), result: null, diagnosis: null };
+  const rec = { id, repo, config, mainConfig, targeted: config !== mainConfig, attempt, parent, status: "running", tail: "", startedAt: Date.now(), result: null, diagnosis: null };
   const h = startRun({ cli, repoPath: repo, config, username, accessKey, onData: (s) => { rec.tail = (rec.tail + s).slice(-20000); } });
   rec.stop = h.stop;
   h.promise.then(async (r) => {
     rec.result = r;
-    const evidence = collectEvidence({ output: r.output, repoPath: repo, since: r.startedAt });
+    const evidence = collectEvidence({ output: r.output, repoPath: repo, since: r.startedAt, artifactsDir: r.artifactsDir });
     let yamlText = "";
     try { yamlText = fs.readFileSync(path.resolve(repo, config), "utf8"); } catch {}
     const profile = analyzeRepo(repo);
@@ -441,6 +441,7 @@ function runView(rec, tailChars = 3000) {
     elapsedSec: Math.round(((rec.result?.finishedAt || Date.now()) - rec.startedAt) / 1000),
     exitCode: rec.result?.exitCode ?? null,
     jobUrl: d?.jobUrl || (rec.tail.match(/https:\/\/[\w.-]*hyperexecute[\w.-]*\/[^\s"')]+/i) || [])[0] || null,
+    targetedRerun: rec.targeted || undefined,
     diagnosis: d,
     logFiles: rec.evidence?.files,
     logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
@@ -448,6 +449,8 @@ function runView(rec, tailChars = 3000) {
     next:
       rec.status === "running" ? "Call get_hyperexecute_run again in a minute or two." :
       rec.status === "fixable" ? "Call fix_and_rerun_hyperexecute with this runId to apply the YAML fixes and start the next attempt." :
+      rec.status === "fixable-tests" ? "Some tests failed for YAML/environment reasons (see diagnosis.tests.list). Call fix_and_rerun_hyperexecute — it fixes the YAML and reruns only those tests; code failures are left alone." :
+      rec.status === "needs-input" ? `Tests need environment values the YAML doesn't have: ${(d?.needsValue || []).join(", ")}. Ask the user for them, then call fix_and_rerun_hyperexecute with values.` :
       rec.status === "test-failures" ? "The tests themselves failed — not a YAML problem. Report them; don't rerun." :
       ["unknown", "needs-attention"].includes(rec.status) ? "Read logDigest, decide on a YAML change (validate it), then call fix_and_rerun_hyperexecute with yamlContent." : undefined,
   };
@@ -502,23 +505,27 @@ server.registerTool(
       fixIds: z.array(z.string()).optional(),
       yamlContent: z.string().optional().describe("Your own corrected YAML (for needs-attention / unknown diagnoses)"),
       rerun: z.boolean().optional().describe("Default true"),
+      values: z.record(z.string(), z.string()).optional().describe("Values for environment variables the diagnosis lists in needsValue (ask the user)"),
+      onlyAffected: z.boolean().optional().describe("Default true: when only some tests failed for YAML reasons, rerun just those tests"),
       maxAttempts: z.number().int().min(1).max(10).optional(),
     },
   },
-  async ({ runId, fixIds, yamlContent, rerun = true, maxAttempts = 3 }) => {
+  async ({ runId, fixIds, yamlContent, rerun = true, maxAttempts = 3, values = {}, onlyAffected = true }) => {
     try {
       const rec = runs.get(runId);
       if (!rec) throw new Error(`Unknown runId ${runId}`);
       if (rec.status === "running") throw new Error("Run is still in progress.");
       if (["passed", "passed-with-failures"].includes(rec.status) && !yamlContent) throw new Error("Run passed — nothing to fix.");
       if (["test-failures", "auth-error"].includes(rec.status) && !yamlContent) throw new Error(`Diagnosis is ${rec.status}; changing the YAML won't help.`);
+      const missing = (rec.diagnosis?.needsValue || []).filter((n) => !values[n]);
+      if (rec.status === "needs-input" && missing.length && !yamlContent) throw new Error(`Provide values for: ${missing.join(", ")}`);
       if (rec.attempt >= maxAttempts) throw new Error(`Reached ${maxAttempts} attempts — stopping. Review the diagnosis manually.`);
-      const file = path.resolve(rec.repo, rec.config);
+      const file = path.resolve(rec.repo, rec.mainConfig);
       const before = fs.readFileSync(file, "utf8");
       let next = yamlContent;
       let applied = ["custom YAML"];
       if (!next) {
-        const r = applyDiagnosisFixes(before, rec.diagnosis, fixIds);
+        const r = applyDiagnosisFixes(before, rec.diagnosis, fixIds, values);
         next = r.yaml;
         applied = r.applied;
         if (Object.keys(r.options).length) {
@@ -530,7 +537,22 @@ server.registerTool(
       if (!v.valid) throw new Error(`Fixed YAML doesn't validate: ${v.errors.join(" | ")}`);
       fs.writeFileSync(file, next);
       const out = { applied, written: file };
-      if (rerun) out.nextRun = runView(await launch(rec.repo, rec.config, rec.attempt + 1, rec.id));
+      if (rerun) {
+        const d = rec.diagnosis;
+        const sels = d ? fixableSelectors(d, values) : [];
+        const targeted = !yamlContent && onlyAffected && d?.status === "fixable-tests" && !d.fullRerunNeeded && sels.length;
+        if (targeted) {
+          const profile = analyzeRepo(rec.repo);
+          const rerunYaml = buildTargetedRerun({ fixedYaml: next, selectors: sels, profile, generate: (o) => generateYaml(profile, o).yaml });
+          const rerunFile = ".hyperexecute-rerun.yaml";
+          fs.writeFileSync(path.resolve(rec.repo, rerunFile), rerunYaml);
+          out.rerunOnly = [...sels];
+          const skipped = (d.needsValue || []).filter((n) => !values[n]);
+          if (skipped.length) out.waitingForValues = skipped;
+          out.leftAlone = d.tests.list.filter((t) => t.cause !== "yaml").map((t) => `${t.label} (${t.cause}: ${t.reason})`);
+          out.nextRun = runView(await launch(rec.repo, rerunFile, rec.attempt + 1, rec.id, rec.mainConfig));
+        } else out.nextRun = runView(await launch(rec.repo, rec.mainConfig, rec.attempt + 1, rec.id));
+      }
       return text(out);
     } catch (e) {
       return fail(e);
