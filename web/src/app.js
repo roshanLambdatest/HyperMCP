@@ -880,20 +880,29 @@ function renderGrid(el) {
   const tog = (k, label) => `<label class="switch"><input type="checkbox" data-k="${k}" ${c[k] ? "checked" : ""}><span class="track"></span>${label}</label>`;
   const r = S.capsResult;
   el.innerHTML = `
-    <p class="muted small">Connection code so your tests run on the LambdaTest grid, in your repo's language. ${S.capsLists ? (L.live ? "Browser and OS lists are live from LambdaTest." : "Offline lists: LambdaTest couldn't be reached.") : "Loading browser lists…"}</p>
+    <p class="muted small">Where your tests connect to a browser, and what to change there to run on the LambdaTest grid. ${S.capsLists ? (L.live ? "Browser and OS lists are live from LambdaTest." : "Offline lists: LambdaTest couldn't be reached.") : "Loading browser lists…"}</p>
     <div class="fields">${sel("c-browser", "Browser", L.browsers, c.browser)}${sel("c-version", "Version", L.versions, c.version)}${sel("c-platform", "Operating system", L.platforms, c.platform)}${sel("c-resolution", "Resolution", L.resolutions, c.resolution)}</div>
     <div class="row mt">${tog("video", "Video")}${tog("network", "Network logs")}${tog("console", "Console logs")}${tog("visual", "Screenshots")}${tog("tunnel", "Tunnel")}${tog("headless", "Headless")}</div>
-    ${r ? `<p class="small mt"><b>${esc(r.helper.path)}</b>: ${inline(r.helper.usage)}</p><pre class="block scroll">${esc(r.helper.content)}</pre>
-      <div class="row"><button class="btn primary" id="capDl">${icon.download}Download ${esc(r.helper.path.split("/").pop())}</button><button class="btn" id="capCp">${icon.copy}Copy</button></div>
-      ${r.setup?.length ? `<p class="small mt"><b>Where your tests create a browser today</b></p><ul class="cards">${r.setup.slice(0, 8).map((s) => `<li class="small"><code>${esc(s.file)}:${s.line}</code> <span class="pill">${esc(s.kind)}</span> ${s.usesLambdaTest ? `<span class="pill ok">LambdaTest</span>` : `<span class="pill warn">not LambdaTest</span>`}<div><code>${esc(s.code)}</code></div></li>`).join("")}</ul>` : ""}` : ""}`;
+    ${r ? gridChanges(r) : ""}`;
   for (const k of ["browser", "version", "platform"]) $(`#c-${k}`).onchange = (e) => { c[k] = e.target.value; loadCaps(true); };
   $("#c-resolution").onchange = (e) => { c.resolution = e.target.value; loadCaps(false); };
   $$("input[data-k]", el).forEach((i) => (i.onchange = () => { c[i.dataset.k] = i.checked; loadCaps(false); }));
-  if (r) {
-    $("#capDl").onclick = () => download(r.helper.path.split("/").pop(), r.helper.content);
-    $("#capCp").onclick = () => copy(r.helper.content, "Code copied");
-  }
+  $$("[data-cap-copy]", el).forEach((b) => (b.onclick = () => copy(gridBlocks(r)[+b.dataset.capCopy].code, "Code copied")));
   if (!S.capsLists) loadCaps(true);
+}
+// the change for each place the repo connects; with none found, the code to use where the driver is created
+const gridBlocks = (r) => {
+  const withCode = (r.points || []).filter((p) => p.code);
+  return withCode.length ? withCode.slice(0, 6) : [{ change: "Use this where your tests create their driver.", code: r.snippet.replace(/\bDRIVER\b/g, "driver") }];
+};
+function gridChanges(r) {
+  const points = r.points || [];
+  const onLT = points.filter((p) => p.usesLambdaTest).length;
+  const where = points.length
+    ? `<p class="small mt"><b>Where your tests connect</b> · ${points.length} place${points.length === 1 ? "" : "s"}, ${onLT ? `${onLT} already on LambdaTest` : "none on LambdaTest yet"}</p><ul class="cards">${points.slice(0, 12).map((s) => `<li class="small"><code>${esc(s.file)}:${s.line}</code> <span class="pill">${esc(s.kind)}</span> ${s.usesLambdaTest ? `<span class="pill ok">LambdaTest</span>` : `<span class="pill warn">not LambdaTest</span>`}<div><code>${esc(s.current)}</code></div></li>`).join("")}</ul>`
+    : `<p class="small mt muted">${["cypress", "testcafe"].includes(r.framework) ? "This framework runs its browsers on the HyperExecute VM; there is no grid connection to change." : "No browser or device connection found. Look in your base class, hooks or config for where the driver is created."}</p>`;
+  const changes = gridBlocks(r).map((p, i) => `<div class="mt"><p class="small">${p.file ? `<code>${esc(p.file)}:${p.line}</code> ` : ""}${esc(p.change)}</p><pre class="block scroll">${esc(p.code)}</pre>${p.imports ? `<p class="small muted">Imports, if missing: ${esc(p.imports.join(", "))}</p>` : ""}<div class="row"><button class="btn" data-cap-copy="${i}">${icon.copy}Copy</button></div></div>`).join("");
+  return `${where}<p class="small mt"><b>What to change</b> <span class="muted">(in your own files; nothing new to add)</span></p>${changes}`;
 }
 let capsSeq = 0;
 async function loadCaps(refreshLists) {
@@ -911,7 +920,7 @@ async function loadCaps(refreshLists) {
     }
   }
   const r = core.generateConnection(S.profile, S.caps);
-  r.setup = core.findDriverSetup(ROOT, S.profile);
+  r.points = core.planConnectionChanges(core.findDriverSetup(ROOT, S.profile), r);
   S.capsResult = r;
   if (S.tab === "grid") renderGrid($("#panel"));
 }

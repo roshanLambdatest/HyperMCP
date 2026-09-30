@@ -6,7 +6,7 @@ export { generateYaml, v02FrameworkName } from "../../src/generator.js";
 export { validateYaml } from "../../src/validator.js";
 export { optimizeYaml, applyOptimizations, describeSuggestions } from "../../src/optimizer.js";
 export { scanRepo, scanCredentials, planCredentialFixes } from "../../src/security.js";
-export { capabilityOptions, generateConnection, findDriverSetup } from "../../src/capabilities.js";
+export { capabilityOptions, generateConnection, findDriverSetup, planConnectionChanges } from "../../src/capabilities.js";
 export { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis } from "../../src/doctor.js";
 export { cliDownloadUrl } from "./cli-url.js";
 export { generatePipeline, CI_SYSTEMS } from "../../src/pipelines.js";

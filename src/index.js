@@ -17,21 +17,21 @@ import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS, cacheConfluencePage, cacheStatus } from "./knowledge.js";
 import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
 import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } from "./security.js";
-import { capabilityOptions, generateConnection, findDriverSetup } from "./capabilities.js";
+import { capabilityOptions, generateConnection, findDriverSetup, planConnectionChanges } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
 import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
-import { withLearned, recordChoice, saveSuccessCase } from "./learning.js";
+import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
 
 // Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
 const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
 
 Workflow for "set up HyperExecute" (or anything like it):
-1. analyze_repo first. If confidence is not "high", show the assumptions and ASK its questions before generating; never guess a Maven profile, env values or which framework runs.
+1. analyze_repo first. If confidence is not "high", show the assumptions and ASK its questions before generating; never guess a Maven profile, env values or which framework runs. If it returns teamMemory, follow its notes: the team already decided those things.
 2. If analyze_repo lists existingHyperExecuteYamls, offer to validate_hyperexecute_yaml + optimize_hyperexecute_yaml that file before generating a new one.
 3. scan_credentials_and_reporting before any run; offer fix_hardcoded_credentials when it finds the customer's keys in code.
-4. generate_hyperexecute_yaml with only the options the user asked for (it starts from their learned usual settings), then validate_hyperexecute_yaml. For v0.1, dry_run_test_discovery and compare the count with the tests analyze_repo found.
+4. generate_hyperexecute_yaml with only the options the user asked for (it starts from the team's settings for the repo, then the user's learned usual settings), then validate_hyperexecute_yaml. For v0.1, dry_run_test_discovery and compare the count with the tests analyze_repo found.
 5. Write the file (write: true) only after the user agrees. Offer generate_ci_pipeline when they want runs from CI.
 6. run_hyperexecute_job, then get_hyperexecute_run until done. Follow its "next". On fixable failures use fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test-failures (code bugs) or auth errors: report them.
 7. A green run with discoveryCheck "zero-tests" is a failure: fix discovery before calling it done.
@@ -41,6 +41,8 @@ Rules that matter:
 - runson is linux, mac, mac13, win or win11. Cross-browser or multi-OS = matrix axes in v0.1.
 - Values the tests read (BASE_URL…) come from the user: ask, never invent. Secrets stay \${{ .secrets.X }} unless the user saved their own LambdaTest account.
 - When no rule explains a failure, read the logDigest, propose a minimal YAML change, validate it, then fix_and_rerun_hyperexecute with yamlContent. Unrecognized failures are saved for review_diagnosis_feedback.
+- When the user states a lasting decision for this repo ("always win11", "use the ci profile", "staging needs the tunnel") or corrects the YAML in a way that should stick, call remember_for_team so every teammate's agent gets it.
+- Grid connection: generate_lambdatest_capabilities finds where the repo connects. Tell the user those file:line locations; change the existing code in place only when asked. Never create a new helper or connection file.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
 
 const server = new McpServer({ name: "hyperexecute", version: "1.8.0" }, { instructions: INSTRUCTIONS });
@@ -63,7 +65,11 @@ server.registerTool(
   },
   async ({ repoPath }) => {
     try {
-      return text(summarizeProfile(analyzeRepo(resolveRepo(repoPath))));
+      const repo = resolveRepo(repoPath);
+      const summary = summarizeProfile(analyzeRepo(repo));
+      const team = readTeamMemory(repo);
+      if (team) summary.teamMemory = { file: TEAM_FILE, options: team.options, notes: team.notes, lastPassing: team.passingSetups[0] };
+      return text(summary);
     } catch (e) {
       return fail(e);
     }
@@ -114,15 +120,22 @@ server.registerTool(
       const repo = resolveRepo(args.repoPath);
       const profile = analyzeRepo(repo);
       const explicit = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined));
-      let { options: opts, learned } = args.useLearned === false ? { options: explicit, learned: {} } : withLearned(profile, explicit);
+      let { options: opts, learned, team } = args.useLearned === false ? { options: explicit, learned: {}, team: {} } : withLearned(profile, explicit, repo);
       let result;
       try {
         result = generateYaml(profile, opts);
       } catch (e) {
-        if (!Object.keys(learned).length) throw e;
-        // a learned choice that doesn't fit this repo (e.g. a split its framework lacks): drop what was learned
-        ({ options: opts, learned } = { options: explicit, learned: {} });
-        result = generateYaml(profile, opts);
+        if (!Object.keys(learned).length && !Object.keys(team).length) throw e;
+        // a remembered choice that doesn't fit this repo (e.g. a split its framework lacks): drop this user's
+        // usual settings first, then the team's
+        try {
+          if (!Object.keys(learned).length) throw e;
+          ({ options: opts, learned } = { options: { ...team, ...explicit }, learned: {} });
+          result = generateYaml(profile, opts);
+        } catch {
+          ({ options: opts, learned, team } = { options: explicit, learned: {}, team: {} });
+          result = generateYaml(profile, opts);
+        }
       }
       if (args.write) recordChoice(profile, explicit);
       const validation = validateYaml(result.yaml, repo);
@@ -145,6 +158,7 @@ server.registerTool(
           `\nYAML v${result.yamlVersion} | framework: ${result.framework} | mode: ${result.executionMode} | split: ${result.splitBy} (supported: ${result.supportedSplits.join(", ")})`,
           result.notes.length ? `\nNotes:\n- ${result.notes.join("\n- ")}` : "",
           result.warnings.length ? `\nWarnings:\n- ${result.warnings.join("\n- ")}` : "",
+          Object.keys(team).length ? `\nUsing the team's settings for this repo (${TEAM_FILE}): ${Object.entries(team).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")}. Pass the option explicitly to override, or remember_for_team to change it for everyone.` : "",
           Object.keys(learned).length ? `\nUsing this user's usual settings for ${result.framework}: ${Object.entries(learned).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")} (learned from earlier choices; pass the option explicitly, or useLearned:false, to override).` : "",
           profile.confidence?.level !== "high" ? `\nConfidence: ${profile.confidence.level} (${profile.confidence.reasons.join("; ")})` : "",
           profile.assumptions?.length ? `\nAssumptions:\n- ${profile.assumptions.join("\n- ")}` : "",
@@ -368,9 +382,9 @@ server.registerTool(
 server.registerTool(
   "generate_lambdatest_capabilities",
   {
-    title: "Generate LambdaTest capabilities",
+    title: "Find the grid connection and plan the LambdaTest change",
     description:
-      "Generate LambdaTest (TestMu AI) grid connection code in the repo's language/framework (Java/Python/C# Selenium, selenium-webdriver, WebdriverIO, Playwright CDP) following https://www.testmuai.com/capabilities-generator/ — capabilities under LT:Options, credentials from LT_USERNAME/LT_ACCESS_KEY. Also lists where the repo currently creates its driver. Call with listOptions:true to get the live browser/version/OS/resolution lists. writeHelper:true writes a helper file (LambdaTestDriverFactory / lambdatest_driver.py / …) without touching existing test code.",
+      "Find where the repo connects to a browser or device (driver creation, WebdriverIO/Nightwatch config, grid URLs in code or config files), say whether each already uses LambdaTest (TestMu AI), and give the exact in-place change for the chosen capabilities (browser, version, OS, resolution, build, video…, or Appium real devices) in the repo's own language, credentials from LT_USERNAME/LT_ACCESS_KEY. It never creates or edits files: tell the user where the connection is made, and change those existing lines yourself only after the user asks. Never add a new helper or connection file. listOptions:true returns the live browser/version/OS/resolution lists.",
     inputSchema: {
       repoPath: z.string().optional(),
       listOptions: z.boolean().optional(),
@@ -391,27 +405,34 @@ server.registerTool(
       device: z.string().optional().describe('Real device name, e.g. "Galaxy S23", "iPhone 15"'),
       platformVersion: z.string().optional(),
       app: z.string().optional().describe("lt://APP_ID of the app uploaded to LambdaTest"),
-      writeHelper: z.boolean().optional(),
     },
   },
-  async ({ repoPath, listOptions, writeHelper, ...opts }) => {
+  async ({ repoPath, listOptions, ...opts }) => {
     try {
       const repo = resolveRepo(repoPath);
       if (listOptions) return text(await capabilityOptions(opts));
       const profile = analyzeRepo(repo);
-      const r = generateConnection(profile, opts);
-      const setup = findDriverSetup(repo, profile);
-      let written = "";
-      if (writeHelper) {
-        const out = path.join(repo, r.helper.path);
-        if (fs.existsSync(out)) throw new Error(`${r.helper.path} already exists — not overwriting.`);
-        fs.mkdirSync(path.dirname(out), { recursive: true });
-        fs.writeFileSync(out, r.helper.content);
-        written = `\nWritten: ${r.helper.path}`;
+      const conn = generateConnection(profile, opts);
+      const points = planConnectionChanges(findDriverSetup(repo, profile), conn);
+      const noGrid = ["cypress", "testcafe"].includes(profile.primaryFramework);
+      const out = [];
+      if (!points.length) {
+        out.push(noGrid
+          ? `${profile.primaryFramework} runs its browsers on the HyperExecute VM itself; there is no grid connection to change.`
+          : "No connection to a browser or device was found in this repo. Ask the user where the tests create their driver (a base class, a hook, a config file); do not create a new file.");
+      } else {
+        const onLT = points.filter((p) => p.usesLambdaTest).length;
+        out.push(`Connection points (${points.length}; ${onLT} already on LambdaTest):`);
+        for (const p of points) {
+          out.push(`\n- ${p.file}:${p.line} [${p.kind}${p.usesLambdaTest ? ", LambdaTest" : ""}]  ${p.current}\n  Change: ${p.change}`);
+          if (p.code) out.push("  ```" + conn.language + "\n" + p.code + "\n  ```");
+          if (p.imports) out.push(`  Imports this needs, if the file lacks them: ${p.imports.join(", ")}`);
+        }
       }
-      return text(
-        `Hub: ${r.hub}\nCapabilities:\n${JSON.stringify(r.capabilities, null, 2)}\n\nHelper (${r.helper.path}):\n\`\`\`\n${r.helper.content}\`\`\`\nUsage: ${r.helper.usage}${written}\n\nDriver setup found in repo:\n${setup.map((s) => `- ${s.file}:${s.line} [${s.kind}${s.usesLambdaTest ? ", already LambdaTest" : ""}] ${s.code}`).join("\n") || "- none found"}\n\nNotes:\n- ${r.notes.join("\n- ")}`
-      );
+      out.push(`\nHub: ${conn.hub}\nCapabilities:\n${JSON.stringify(conn.capabilities, null, 2)}`);
+      out.push(`\nNotes:\n- ${conn.notes.join("\n- ")}`);
+      if (points.length) out.push("\nNext: tell the user where the connection is made and what would change. Edit only when they ask, and only those lines in the existing files: read each file first and fit the change to its code (keep its variable names, waits and hooks). Do not create a new helper or connection file. Nothing was changed.");
+      return text(out.join("\n"));
     } catch (e) {
       return fail(e);
     }
@@ -490,7 +511,9 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     if (rec.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(rec.status)) rec.status = "needs-attention";
     if (!r.stopped && rec.status === "passed" && !rec.targeted) {
       rec.savedCase = saveSuccessCase({ repo, yamlText, profile, jobId: rec.diagnosis.jobId });
-      recordChoice(profile, readOptionsFromYaml(yamlText));
+      const ran = readOptionsFromYaml(yamlText);
+      recordChoice(profile, ran);
+      rec.teamFile = recordTeamPass(repo, { options: ran, configFile: config, jobId: rec.diagnosis.jobId, framework: profile.primaryFramework });
     }
     if (!r.stopped) {
       rec.feedbackFile = recordUnmatched({ source: "run", runId: id, diagnosis: { ...rec.diagnosis, status: rec.status }, logText: evidence.text, profile, yamlText });
@@ -524,6 +547,7 @@ function runView(rec, tailChars = 3000) {
     diagnosis: d,
     discoveryCheck: rec.discoveryCheck && rec.discoveryCheck.verdict !== "ok" ? rec.discoveryCheck : rec.discoveryCheck ? { verdict: "ok", platformDiscovered: rec.discoveryCheck.platformDiscovered, executedTests: rec.discoveryCheck.executedTests } : undefined,
     savedAsAccuracyCase: rec.savedCase ? "This passing setup was saved as an accuracy case, so future versions are checked against it." : undefined,
+    teamMemory: rec.teamFile ? `Team memory updated (${TEAM_FILE}): commit it so teammates' agents start from this passing setup.` : undefined,
     savedForReview: rec.feedbackFile ? "The unexplained part of this failure was saved (masked) for rule review — see review_diagnosis_feedback." : undefined,
     logFiles: rec.evidence?.files,
     logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
@@ -753,6 +777,31 @@ server.registerTool(
 );
 
 server.registerTool(
+  "remember_for_team",
+  {
+    title: "Remember a setting or note for the whole team",
+    description:
+      `Save what the user decided for this repo into ${TEAM_FILE} (committed with the repo), so every teammate's agent starts from it: options (runson, concurrency, splitBy, yamlVersion, mavenProfile, tags, extraEnv…) and notes ("staging needs the tunnel", "never split the checkout suite"). USE when the user says "always…", "for this repo use…", "remember that…", or corrects a generated YAML in a way that should stick. Passing runs update it automatically. Credentials are refused. Not for this user's personal defaults (those are learned automatically).`,
+    inputSchema: {
+      repoPath: z.string().optional(),
+      options: z.record(z.string(), z.any()).optional().describe(`Options to pin for the team; allowed: ${TEAM_OPTIONS.join(", ")}`),
+      unset: z.array(z.string()).optional().describe("Option names to stop pinning"),
+      note: z.string().optional().describe("A short fact every teammate's agent should know about this repo"),
+      removeNote: z.string().optional().describe("Remove the note that matches this text"),
+    },
+  },
+  async ({ repoPath, options, unset, note, removeNote }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const r = rememberForTeam(repo, { options, unset, note, removeNote });
+      return text({ file: r.file, options: r.memory.options, notes: r.memory.notes, rejected: r.rejected.length ? r.rejected : undefined, next: `Commit ${TEAM_FILE} so the team gets it.` });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
   "review_diagnosis_feedback",
   {
     title: "Review unrecognized failures and fix outcomes",
@@ -809,7 +858,7 @@ Steps:
 4. Call generate_hyperexecute_yaml with the right options (framework, runson, splitBy, concurrency).
 5. Call dry_run_test_discovery and check the discovered count matches expectations.
 6. Call optimize_hyperexecute_yaml and apply the worthwhile suggestions.
-7. If tests don't already connect to LambdaTest, offer generate_lambdatest_capabilities.
+7. If tests don't already connect to LambdaTest, run generate_lambdatest_capabilities, show the user where the connection is made, and change those lines in place only if they ask (never add a helper file).
 8. Resolve every validation error and placeholder, then write the file (write: true).
 9. If the user wants it run: run_hyperexecute_job, poll get_hyperexecute_run, and on a fixable failure call fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test failures.`,
         },

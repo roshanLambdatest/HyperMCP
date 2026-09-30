@@ -123,9 +123,9 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     check("live capability lists", co && co.result.live && co.result.browser === "Firefox" && co.result.platforms.length > 3, JSON.stringify(co?.result).slice(0, 300));
     await send({ type: "capsGenerate", opts: { browser: "Firefox", platform: "Windows 11" } });
     const cg = [...posted].reverse().find((m) => m.type === "caps");
-    check("capabilities helper + driver setup", cg && /FirefoxOptions/.test(cg.result.helper.content) && cg.result.setup.length > 0);
-    await send({ type: "capsWrite", opts: { browser: "Firefox", platform: "Windows 11" } });
-    check("helper file written", fs.existsSync(path.join(tmpRepo, cg.result.helper.path)));
+    const before = fs.readdirSync(path.join(tmpRepo, "src/test/java/com/acme")).length;
+    check("connection points with in-place changes", cg && cg.result.points.some((p) => /BaseTest\.java/.test(p.file) && /FirefoxOptions/.test(p.code || "")) && !cg.result.helper);
+    check("no connection file created", fs.readdirSync(path.join(tmpRepo, "src/test/java/com/acme")).length === before);
     await send({ type: "fixCredentials" });
     const java = fs.readFileSync(path.join(tmpRepo, "src/test/java/com/acme/BaseTest.java"), "utf8");
     check("credentials replaced in code, app login untouched", !java.includes("customerjohn") && java.includes("System.getenv(\"LT_ACCESS_KEY\")") && java.includes("standard_user"));

@@ -32,7 +32,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status", "remember_for_team"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -106,7 +106,7 @@ check("credential fix dry run shows env lookups, writes nothing", fixr.text.star
 
 // Capabilities
 let cap = await call("generate_lambdatest_capabilities", { repoPath: fx("creds"), browser: "Firefox", platform: "Windows 11" });
-check("java capabilities helper", cap.text.includes("FirefoxOptions") && cap.text.includes("LT:Options") && cap.text.includes("BaseTest.java:21"), cap.text.slice(0, 600));
+check("java connection point + in-place change", cap.text.includes("FirefoxOptions") && cap.text.includes("LT:Options") && /BaseTest\.java:21 \[remote/.test(cap.text) && /Change:/.test(cap.text) && /never|Do not create a new helper/i.test(cap.text), cap.text.slice(0, 900));
 let opts = JSON.parse((await call("generate_lambdatest_capabilities", { repoPath: fx("creds"), listOptions: true })).text);
 check("live capability options", opts.browsers.includes("Chrome") && opts.platforms.length > 3, opts);
 
@@ -304,9 +304,10 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   let d5 = JSON.parse((await call("dry_run_test_discovery", { repoPath: fx("ruby-rspec"), command: extract(rb) })).text);
   check("Ruby RSpec: discovery finds file:line examples", d5.discovered === 2 && /spec\/cart_spec\.rb:\d+/.test(d5.items[0]), d5);
   let capRb = await call("generate_lambdatest_capabilities", { repoPath: fx("ruby-rspec"), browser: "Firefox" });
-  check("Ruby grid helper", /Selenium::WebDriver::Options\.firefox/.test(capRb.text) && /lambdatest_driver\.rb/.test(capRb.text), capRb.text.slice(0, 300));
+  check("Ruby: local driver found, replaced in place on the same variable", /spec\/spec_helper\.rb:5 \[local\]/.test(capRb.text) && /Selenium::WebDriver::Options\.firefox/.test(capRb.text) && /@driver = Selenium::WebDriver\.for\(:remote/.test(capRb.text) && !/lambdatest_driver\.rb/.test(capRb.text), capRb.text.slice(0, 900));
+  check("connection tool creates no files", !fs.existsSync(path.join(fx("ruby-rspec"), "spec", "lambdatest_driver.rb")) && fs.readdirSync(path.join(fx("ruby-rspec"), "spec")).length === 2);
   let capMob = await call("generate_lambdatest_capabilities", { repoPath: fx("pytest"), mobile: true, device: "Pixel 8" });
-  check("Appium real-device helper", /mobile-hub\.lambdatest\.com/.test(capMob.text) && /Pixel 8/.test(capMob.text) && /isRealMobile/.test(capMob.text) && /lt:\/\/APP_ID/.test(capMob.text), capMob.text.slice(0, 300));
+  check("Appium real-device capabilities", /mobile-hub\.lambdatest\.com/.test(capMob.text) && /Pixel 8/.test(capMob.text) && /isRealMobile/.test(capMob.text) && /lt:\/\/APP_ID/.test(capMob.text), capMob.text.slice(0, 300));
 
   // learning: the same choice twice becomes the starting point; explicit options still win
   await call("generate_hyperexecute_yaml", { repoPath: repo5, runson: "win11", concurrency: 12, write: true, outputFileName: "a.yaml" });
@@ -324,6 +325,24 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   const caseDir = path.join(state, "accuracy-cases", path.basename(repo5));
   const saved = fs.existsSync(path.join(caseDir, "expected.yaml")) ? fs.readFileSync(path.join(caseDir, "expected.yaml"), "utf8") : "";
   check("passing run saved as an accuracy case", s6.status === "passed" && /saved as an accuracy case/.test(s6.savedAsAccuracyCase || "") && /tunnel: true/.test(saved) && !/test-key-123/.test(saved), JSON.stringify(s6).slice(0, 400));
+  const teamFile = path.join(repo5, ".hyperexecute", "team.json");
+  const tm0 = fs.existsSync(teamFile) ? JSON.parse(fs.readFileSync(teamFile, "utf8")) : {};
+  check("team memory: passing run recorded in the repo", tm0.passingSetups?.length === 1 && tm0.options?.tunnel === true && /Team memory updated/.test(s6.teamMemory || "") && !JSON.stringify(tm0).includes("test-key-123"), JSON.stringify(tm0).slice(0, 400));
+
+  // team memory: an explicit decision is shared, beats this user's usual settings, loses to explicit options
+  let tm = JSON.parse((await call("remember_for_team", { repoPath: repo5, options: { runson: "mac", concurrency: 20, extraEnv: { BASE_URL: "https://staging.example.com", API_TOKEN: "abc" } }, note: "Staging needs the tunnel" })).text);
+  check("team memory: saved, secret env refused", tm.options.runson === "mac" && tm.options.extraEnv.BASE_URL && !tm.options.extraEnv.API_TOKEN && tm.rejected?.some((r) => /API_TOKEN/.test(r)) && tm.notes.includes("Staging needs the tunnel"), tm);
+  lg = await call("generate_hyperexecute_yaml", { repoPath: repo5 });
+  check("team memory: team settings win over usual settings", /runson: mac/.test(lg.text) && /concurrency: 20/.test(lg.text) && /staging\.example\.com/.test(lg.text) && /team's settings/.test(lg.text), lg.text.slice(0, 900));
+  lg = await call("generate_hyperexecute_yaml", { repoPath: repo5, runson: "linux" });
+  check("team memory: explicit option wins", /runson: linux/.test(lg.text) && /concurrency: 20/.test(lg.text), lg.text.slice(0, 500));
+  const an = JSON.parse((await call("analyze_repo", { repoPath: repo5 })).text);
+  check("team memory: analyze_repo shows notes", an.teamMemory?.notes?.includes("Staging needs the tunnel") && an.teamMemory.lastPassing, an.teamMemory);
+  tm = JSON.parse((await call("remember_for_team", { repoPath: repo5, unset: ["runson"], removeNote: "staging" })).text);
+  check("team memory: unset and remove note", !tm.options.runson && !tm.notes.length, tm);
+  await call("remember_for_team", { repoPath: repo5, options: { splitBy: "nonsense-split" } });
+  lg = await call("generate_hyperexecute_yaml", { repoPath: repo5 });
+  check("team memory: a setting that doesn't fit is dropped, not an error", !lg.isError && /runson:/.test(lg.text), lg.text.slice(0, 300));
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");

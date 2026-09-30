@@ -62,7 +62,7 @@ sequenceDiagram
 | Run and fix | `run_hyperexecute_job`, `get_hyperexecute_run`, `fix_and_rerun_hyperexecute`, `diagnose_hyperexecute_logs` | Live logs, a diagnosis per failed test, YAML fixes, reruns of only the affected tests, and a warning when a green job ran 0 tests |
 | Run from CI | `generate_ci_pipeline` | A GitHub Actions, GitLab CI, Jenkins or Azure DevOps file that runs the YAML on every push, with the account from the CI's secrets |
 | Stay safe | `scan_credentials_and_reporting`, `fix_hardcoded_credentials` | Hard-coded customer credentials and customer-side reporting (TestRail, Jira, Slack…) found before anything runs |
-| Connect to LambdaTest | `set_lambdatest_credentials`, `lambdatest_credentials_status`, `generate_lambdatest_capabilities` | One saved account used everywhere; grid capabilities from live browser/OS lists |
+| Connect to LambdaTest | `set_lambdatest_credentials`, `lambdatest_credentials_status`, `generate_lambdatest_capabilities` | One saved account used everywhere; finds where the tests connect and what to change there, from live browser/OS lists |
 | Know more | `search_knowledge_base`, `get_confluence_page`, `knowledge_base_status` | Search across the bundled notes, example YAMLs and Confluence, with synonyms |
 | Get better | `review_diagnosis_feedback` | Failures it didn't recognize, grouped, so they become new rules |
 
@@ -98,7 +98,7 @@ Claude alone can write a YAML that looks right; HyperExecute Studio catches the 
 | `knowledge_base_status` | Lists KB topics and tests the Confluence login |
 | `scan_credentials_and_reporting` | Finds hard-coded LambdaTest usernames/access keys (masked) and integrations that report to the customer's side (TestRail, Jira/Xray, ReportPortal, Slack/Teams, email, Allure TestOps, Cypress Cloud, Percy/Applitools, other grids) |
 | `fix_hardcoded_credentials` | Rewrites hard-coded credentials to read `LT_USERNAME` / `LT_ACCESS_KEY`. Dry run by default |
-| `generate_lambdatest_capabilities` | LambdaTest grid connection code in the repo's language (`LT:Options`), using live browser/OS lists; Appium real-device capabilities for mobile repos (Java, Python, Node). Can write a helper file |
+| `generate_lambdatest_capabilities` | Finds where the repo connects to a browser or device (driver creation, WebdriverIO/Nightwatch config, grid URLs in code or config files) and whether each place already uses LambdaTest, then gives the in-place change for each one in the repo's language (`LT:Options`, live browser/OS lists, Appium real devices for Java, Python, Node). Never creates or edits files: the agent tells you where the connection is and edits those lines only when you ask |
 | `generate_ci_pipeline` | GitHub Actions, GitLab CI, Jenkins or Azure DevOps file that runs the YAML from the customer's CI: downloads the CLI, takes `LT_USERNAME` / `LT_ACCESS_KEY` from the CI secrets, fails the build on failure, keeps the logs |
 | `optimize_hyperexecute_yaml` | Ranked speed/cost/reliability suggestions for a YAML; applies the ones you pick |
 | `set_lambdatest_credentials` | Verifies and saves your LambdaTest account once (shared with the Studio) |
@@ -127,12 +127,20 @@ claude mcp add hyperexecute -s user -- npx -y github:roshanLambdatest/HyperMCP
 ```
 The server (named `hyperexecute`) analyzes the folder Claude Code is running in. Upgrading from 1.7.0 or older? Remove the old name first: `claude mcp remove hyperexecute-yaml -s user`. Needs Node.js 18+.
 
+**Fewer approval prompts.** To let Claude Code analyze, generate, validate, diagnose and remember without asking, while still asking before it starts a job, reruns one or edits your code or saved account, add this to `permissions` in `~/.claude/settings.json`:
+```json
+"allow": ["mcp__hyperexecute__analyze_repo", "mcp__hyperexecute__generate_hyperexecute_yaml", "mcp__hyperexecute__validate_hyperexecute_yaml", "mcp__hyperexecute__dry_run_test_discovery", "mcp__hyperexecute__optimize_hyperexecute_yaml", "mcp__hyperexecute__search_knowledge_base", "mcp__hyperexecute__get_confluence_page", "mcp__hyperexecute__knowledge_base_status", "mcp__hyperexecute__scan_credentials_and_reporting", "mcp__hyperexecute__generate_lambdatest_capabilities", "mcp__hyperexecute__generate_ci_pipeline", "mcp__hyperexecute__get_hyperexecute_run", "mcp__hyperexecute__diagnose_hyperexecute_logs", "mcp__hyperexecute__lambdatest_credentials_status", "mcp__hyperexecute__review_diagnosis_feedback", "mcp__hyperexecute__remember_for_team"],
+"ask": ["mcp__hyperexecute__run_hyperexecute_job", "mcp__hyperexecute__fix_and_rerun_hyperexecute", "mcp__hyperexecute__fix_hardcoded_credentials", "mcp__hyperexecute__set_lambdatest_credentials"]
+```
+`generate_hyperexecute_yaml` and `generate_ci_pipeline` still write a file only when asked to (`write: true`).
+
 ## How it gets better with use
 
-Claude can't be retrained, but the agent around it learns from real use. Everything stays on the machine (`~/.hyperexecute-studio`); `HE_LEARN=off` turns it off.
+Claude can't be retrained, but the agent around it learns from real use. Personal data stays on the machine (`~/.hyperexecute-studio`); `HE_LEARN=off` turns it off. Team memory lives in the repo, so it travels with git.
 
 - **Playbook for any AI client.** The MCP server sends its workflow and rules (ask before guessing, check existing YAMLs first, never rerun code failures, a 0-test pass is a failure) as MCP instructions when a client connects, so Claude and Copilot follow them without being told.
 - **Claude Code skill.** `claude-skill/hyperexecute-studio/SKILL.md` loads automatically for anything about HyperExecute. Install it once: `mkdir -p ~/.claude/skills && cp -r claude-skill/hyperexecute-studio ~/.claude/skills/`.
+- **Team memory in the repo.** `.hyperexecute/team.json` in the tested repo holds what the team decided (OS, VMs, split, Maven profile, env values) and notes every teammate's agent should follow. Passing runs update it; `remember_for_team` saves a decision ("always win11 for this repo", "staging needs the tunnel"). Commit it and review changes like code. Precedence: explicit options, then team, then usual settings. Credentials are refused; `HE_TEAM_MEMORY=off` turns it off.
 - **Usual settings.** Options chosen the same way twice for a framework (OS, VMs, split, retries, timeout, tunnel) become the starting point for that framework. The reply says so; explicit options or `useLearned: false` override. The web version remembers them per browser.
 - **Passing runs become accuracy cases.** Every job that passes saves its repo and YAML (credentials as references only) to `~/.hyperexecute-studio/accuracy-cases`, which `npm run accuracy` checks by default, so a change that breaks a setup that really worked is caught.
 - **Unrecognized failures** are saved for the weekly rule review (below).

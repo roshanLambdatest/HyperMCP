@@ -63,11 +63,9 @@
       </div>
     </section>
     <section class="pane scroll" data-pane="grid">
-      <div class="card"><div class="card-h">Driver setup in this repo</div><div class="card-b" id="driverSetup"><span class="muted small">Loading…</span></div></div>
+      <div class="card"><div class="card-h">Where this repo connects</div><div class="card-b" id="driverSetup"><span class="muted small">Loading…</span></div></div>
       <div class="card"><div class="card-h">Capabilities<span class="spacer"></span><span class="muted small" id="capsLive"></span></div><div class="card-b"><div class="form" id="capsForm"></div></div></div>
-      <div class="card"><div class="card-h"><span id="helperPath">Helper file</span><span class="spacer"></span><button class="icon-btn small" id="capsCopy">Copy</button></div>
-        <pre class="code" id="capsCode"></pre>
-        <div class="actions"><button class="btn primary" id="capsWrite">Create helper file</button></div>
+      <div class="card"><div class="card-h">What to change</div><div class="card-b" id="capsChanges"></div>
         <div class="card-b small muted" id="capsNotes"></div></div>
     </section>
     <section class="pane" data-pane="runs">
@@ -453,17 +451,20 @@
   function renderCaps() {
     const r = capsResult;
     if (!r) return;
-    const setup = r.setup || [];
-    $("#driverSetup").innerHTML = setup.length
-      ? `<ul class="findings">${setup.slice(0, 8).map((d) => `<li><a class="loc" data-file="${esc(d.file)}" data-line="${d.line}">${esc(d.file)}:${d.line}</a> <span class="tag soft">${esc(d.kind)}</span>${d.usesLambdaTest ? ` <span class="ok small">LambdaTest</span>` : ` <span class="warn small">not LambdaTest</span>`}<div><code>${esc(d.code)}</code></div></li>`).join("")}</ul><div class="small muted">Switch these to the helper below to run on the LambdaTest grid.</div>`
-      : `<span class="muted small">No driver creation found — use the helper below in your test setup.</span>`;
+    const points = r.points || [];
+    const onLT = points.filter((p) => p.usesLambdaTest).length;
+    $("#driverSetup").innerHTML = points.length
+      ? `<div class="small muted">${points.length} place${points.length === 1 ? "" : "s"}, ${onLT ? `${onLT} already on LambdaTest` : "none on LambdaTest yet"}. Click one to open it.</div><ul class="findings">${points.slice(0, 12).map((d) => `<li><a class="loc" data-file="${esc(d.file)}" data-line="${d.line}">${esc(d.file)}:${d.line}</a> <span class="tag soft">${esc(d.kind)}</span>${d.usesLambdaTest ? ` <span class="ok small">LambdaTest</span>` : ` <span class="warn small">not LambdaTest</span>`}<div><code>${esc(d.current)}</code></div></li>`).join("")}</ul>`
+      : `<span class="muted small">${["cypress", "testcafe"].includes(r.framework) ? "This framework runs its browsers on the HyperExecute VM; there is no grid connection to change." : "No browser or device connection found. Check your base class, hooks or config file for where the driver is created."}</span>`;
     $("#driverSetup").querySelectorAll("a.loc").forEach((a) => (a.onclick = () => send("openFile", { file: a.dataset.file, line: +a.dataset.line })));
-    $("#helperPath").textContent = r.helper.path;
-    $("#capsCode").textContent = r.helper.content;
-    $("#capsNotes").innerHTML = `<div><b>Use it:</b> <code>${esc(r.helper.usage)}</code></div>` + r.notes.map((n) => `<div>• ${esc(n)}</div>`).join("");
+    const withCode = points.filter((p) => p.code);
+    const blocks = (withCode.length ? withCode : [{ change: "Use this where your tests create their driver.", code: r.snippet.replace(/\bDRIVER\b/g, "driver") }]).slice(0, 6);
+    $("#capsChanges").innerHTML = blocks.map((p, i) => `<div class="change">${p.file ? `<a class="loc" data-file="${esc(p.file)}" data-line="${p.line}">${esc(p.file)}:${p.line}</a> ` : ""}<span class="small">${esc(p.change)}</span>
+      <div class="card-h"><span class="spacer"></span><button class="icon-btn small" data-copy="${i}">Copy</button></div><pre class="code">${esc(p.code)}</pre>${p.imports ? `<div class="small muted">Imports, if missing: ${esc(p.imports.join(", "))}</div>` : ""}</div>`).join("");
+    $("#capsChanges").querySelectorAll("a.loc").forEach((a) => (a.onclick = () => send("openFile", { file: a.dataset.file, line: +a.dataset.line })));
+    $("#capsChanges").querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => send("copyText", { text: blocks[+b.dataset.copy].code })));
+    $("#capsNotes").innerHTML = `<div>• Edit these lines in your own files. The Studio doesn't create or change connection files.</div>` + r.notes.filter((n) => !/connection points/.test(n)).map((n) => `<div>• ${esc(n)}</div>`).join("");
   }
-  $("#capsCopy").onclick = () => capsResult && send("copyText", { text: capsResult.helper.content });
-  $("#capsWrite").onclick = () => send("capsWrite", { opts: caps });
 
   // ================= Optimize =================
   let optimizeResult = null;

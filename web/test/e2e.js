@@ -225,9 +225,9 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   text = await tab("security");
   check("security: 13 credentials, masked, visitor wording", /13 hard-coded LambdaTest credentials/.test(text) && !text.includes("abcdefghijklmnop") && !/customer/i.test(text), text.slice(0, 400));
   text = await tab("grid");
-  await page.waitForSelector("#capDl", { timeout: 20000 });
+  await page.waitForSelector("[data-cap-copy]", { timeout: 20000 });
   text = await page.$eval("#panel", (p) => p.innerText);
-  check("grid: live lists from LambdaTest + helper code", /live from LambdaTest/.test(text) && /LT:Options/.test(await page.$eval("#panel pre", (p) => p.textContent)), text.slice(0, 300));
+  check("grid: live lists, where the tests connect, change in place (no file to download)", /live from LambdaTest/.test(text) && /Where your tests connect/.test(text) && /BaseTest\.java:\d+/.test(text) && /LT:Options/.test(await page.$eval("#panel pre", (p) => p.textContent)) && !(await page.$("#capDl")), text.slice(0, 400));
 
   // ---------- samples ----------
   await page.click("#newRepo");

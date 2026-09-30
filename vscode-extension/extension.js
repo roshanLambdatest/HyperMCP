@@ -394,10 +394,7 @@ class Studio {
         this.post({ type: "capsOptions", result: await c.capabilityOptions(m.opts || {}) });
         break;
       case "capsGenerate":
-        await this.capabilities(m.opts || {}, false);
-        break;
-      case "capsWrite":
-        await this.capabilities(m.opts || {}, true);
+        await this.capabilities(m.opts || {});
         break;
       case "copyText":
         await vscode.env.clipboard.writeText(String(m.text || ""));
@@ -432,7 +429,7 @@ class Studio {
       this.state.discoveredUnits = null;
       // this repo's own saved options win; a repo seen for the first time starts from the user's usual settings
       const saved = this.context.workspaceState.get(this.optionsKey());
-      this.state.options = saved || c.learnedOptions(this.state.profileFull);
+      this.state.options = saved || { ...c.learnedOptions(this.state.profileFull), ...(c.readTeamMemory?.(repoPath)?.options || {}) };
       this.state.dirty = false;
       const out = path.join(repoPath, this.outputName());
       this.state.existingFile = fs.existsSync(out) ? this.outputName() : null;
@@ -688,22 +685,12 @@ class Studio {
   }
 
   // ---------- capabilities ----------
-  async capabilities(opts, write) {
+  // where the repo connects, and the in-place change for each place; the Studio never creates or edits these files
+  async capabilities(opts) {
     const c = await loadCore();
     const r = c.generateConnection(this.state.profileFull, opts);
-    if (!write) {
-      const setup = c.findDriverSetup(this.state.repo, this.state.profileFull);
-      return this.post({ type: "caps", result: { ...r, setup } });
-    }
-    const target = path.join(this.state.repo, r.helper.path);
-    if (fs.existsSync(target)) {
-      const a = await vscode.window.showWarningMessage(`${r.helper.path} already exists. Overwrite it?`, { modal: true }, "Overwrite");
-      if (a !== "Overwrite") return;
-    }
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, r.helper.content);
-    await vscode.window.showTextDocument(vscode.Uri.file(target), { preview: false });
-    this.toast(`Created ${r.helper.path}`);
+    const points = c.planConnectionChanges(c.findDriverSetup(this.state.repo, this.state.profileFull), r);
+    this.post({ type: "caps", result: { ...r, points } });
   }
 
   // ---------- optimizer ----------
@@ -837,7 +824,10 @@ class Studio {
       }
       await this.applyRunFixes(null, true);
     }
-    if (run.status === "passed" && !run.targeted) run.savedCase = !!c.saveSuccessCase({ repo: this.state.repo, yamlText, profile: this.state.profileFull, jobId: d.jobId });
+    if (run.status === "passed" && !run.targeted) {
+      run.savedCase = !!c.saveSuccessCase({ repo: this.state.repo, yamlText, profile: this.state.profileFull, jobId: d.jobId });
+      c.recordTeamPass?.(this.state.repo, { options: this.state.options, configFile: this.outputName(), jobId: d.jobId, framework: this.state.profileFull?.primaryFramework });
+    }
     if (["passed", "passed-with-failures"].includes(run.status)) {
       vscode.window.showInformationMessage(`HyperExecute job ${run.status === "passed" ? "passed" : "finished with test failures"} (attempt ${run.attempt}).`);
     }
