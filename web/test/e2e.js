@@ -254,6 +254,14 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   }
 
   // ---------- phone ----------
+  // the share-link step may have been skipped (GitHub rate limit): make sure a repo is loaded
+  if (!(await page.$("#yaml"))) {
+    await page.goto("about:blank");
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-sample="web-e2e"]');
+    await page.click('[data-sample="web-e2e"]');
+    await page.waitForSelector("#yaml");
+  }
   await page.setViewport({ width: 390, height: 844 });
   await wait(300);
   let overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
