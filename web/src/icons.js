@@ -1,0 +1,31 @@
+// Inline SVG icons (24×24 grid, 1.75 stroke, currentColor), so the page needs no icon font or CDN.
+const svg = (d, extra = "") => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"${extra}>${d}</svg>`;
+
+export const icon = {
+  bolt: svg('<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12L13 2Z"/>'),
+  folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>'),
+  zip: svg('<path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M11 3v2m0 2v2m0 2v2m-1 2h2v3h-2z"/>'),
+  download: svg('<path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14"/>'),
+  copy: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
+  send: svg('<path d="M5 12h13m0 0-5.5-5.5M18 12l-5.5 5.5"/>'),
+  stop: svg('<rect x="7" y="7" width="10" height="10" rx="1.5"/>'),
+  gear: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>'),
+  check: svg('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
+  x: svg('<path d="M6 6l12 12M18 6 6 18"/>'),
+  alert: svg('<path d="M12 9v4m0 3.5v.01M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>'),
+  info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8.5v.01"/>'),
+  play: svg('<path d="M7 5v14l12-7L7 5Z"/>'),
+  shield: svg('<path d="M12 3 4.5 6v6c0 4.5 3.2 7.7 7.5 9 4.3-1.3 7.5-4.5 7.5-9V6L12 3Z"/><path d="m9 12 2 2 4-4"/>'),
+  pulse: svg('<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>'),
+  grid: svg('<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>'),
+  wand: svg('<path d="m4 20 11-11m-2-2 2 2M14.5 3.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8ZM19 9l.5 1.2 1.2.5-1.2.5L19 12.4l-.5-1.2-1.2-.5 1.2-.5L19 9Z"/>'),
+  list: svg('<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>'),
+  undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+  refresh: svg('<path d="M20 11a8 8 0 0 0-14.8-4M4 4v4h4m-4 5a8 8 0 0 0 14.8 4M20 20v-4h-4"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  sparkle: svg('<path d="M12 3.5 13.8 9l5.7 1.8-5.7 1.9L12 18.3l-1.8-5.6-5.7-1.9L10.2 9 12 3.5Z"/>'),
+  code: svg('<path d="m8.5 8-4 4 4 4m7-8 4 4-4 4"/>'),
+  layers: svg('<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>'),
+  chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+  user: svg('<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>'),
+};

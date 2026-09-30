@@ -12,3 +12,6 @@ target/
 test/accuracy/last-report.json
 vscode-extension/.build/
 .gradle/
+web/dist/
+web/test/shots/
+web/src/samples.gen.js
