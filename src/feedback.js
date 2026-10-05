@@ -38,6 +38,14 @@ export function mask(text, secrets = []) {
     .replace(/\b[A-Fa-f0-9]{32,}\b/g, "<hex>");
 }
 
+// Masks secrets but keeps ${{ .secrets.X }} references readable (they hold no secret).
+export function maskKeepRefs(text) {
+  const refs = [];
+  // "&" can't start a masked value, so the placeholder survives mask()
+  const held = String(text ?? "").replace(/\$\{\{[^}]*\}\}/g, (m) => `&HEREF${refs.push(m) - 1}&`);
+  return mask(held).replace(/&HEREF(\d+)&/g, (_, i) => refs[+i]);
+}
+
 // ---------- signature: groups the same failure across runs and repos ----------
 
 const ERR_LINE = /\b(error|exception|failed|failure|fatal|denied|not found|timed? ?out|refused|cannot|could not|unable|ERR::|panic)\b/i;

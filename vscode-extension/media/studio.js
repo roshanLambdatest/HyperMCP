@@ -22,6 +22,7 @@
       <div class="pills">
         <button class="pill" id="backendPill" title="Choose AI backend"><span class="dot"></span><span></span></button>
         <button class="pill" id="kbPill" title="Connect Confluence knowledge base"><span class="dot"></span><span></span></button>
+        <button class="pill" id="confPublish" title="Create a Confluence page documenting what was done for this repo">Add to Confluence</button>
       </div>
     </header>
     <nav class="main-tabs" role="tablist">
@@ -112,6 +113,7 @@
   $("#reanalyze").onclick = () => send("reanalyze");
   $("#backendPill").onclick = () => send("command", { id: "hyperexecute.chooseBackend" });
   $("#kbPill").onclick = () => send("command", { id: "hyperexecute.setAtlassianToken" });
+  $("#confPublish").onclick = () => send("publishConfluence");
   $("#resetOpts").onclick = () => send("resetOptions");
   $("#clearChat").onclick = () => send("clearChat");
   $("#save").onclick = () => send("save");
@@ -555,6 +557,12 @@
       const good = dc.verdict === "ok";
       const nums = [dc.expectedItems != null ? `expected ${dc.expectedItems} (${esc(dc.expectedItemsFrom)})` : "", dc.platformDiscovered != null ? `HyperExecute discovered ${dc.platformDiscovered}` : "", dc.executedTests != null ? `${dc.executedTests} test case(s) in reports` : ""].filter(Boolean).join(" · ");
       html += `<div class="disc-check ${good ? "good" : dc.verdict === "unconfirmed" ? "muted" : "bad"}"><b>${good ? "✓ Test count looks right" : dc.verdict === "zero-tests" ? "✕ 0 tests ran" : dc.verdict === "unconfirmed" ? "Test count not confirmed" : "! Test count differs"}</b>${nums ? `<div class="small">${nums}</div>` : ""}${dc.message ? `<div class="small muted">${esc(dc.message)}</div>` : ""}</div>`;
+    }
+    if (r.learned && !running) html += `<div class="disc-check good"><b>✓ Fix remembered</b><div class="small">The change made before this run fixed it. When this failure comes back, it's suggested first (also saved in <code>.hyperexecute/team.json</code> for the team).</div></div>`;
+    if (r.fixedBefore && !running) {
+      const f = r.fixedBefore;
+      const diff = [...(f.change?.removed || []).map((l) => `- ${l}`), ...(f.change?.added || []).map((l) => `+ ${l}`)].join("\n");
+      html += `<div class="disc-check"><b>Fixed before${f.worked > 1 ? ` (${f.worked}×)` : ""}</b><div class="small">This failure was fixed ${f.from === "team" ? "by the team" : "on this machine"} with this YAML change, and the next run passed. Ask AI to fix uses it first.</div>${diff ? `<pre class="cmd">${esc(diff)}</pre>` : ""}</div>`;
     }
     if (r.savedForReview && !running) html += `<div class="small muted">The unrecognized part of this failure was saved (masked, on this machine) for rule review — <code>npm run feedback</code>.</div>`;
     if (d && !running) {

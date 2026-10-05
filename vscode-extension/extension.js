@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -42,6 +42,7 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("hyperexecute.openStudio", open),
     vscode.commands.registerCommand("hyperexecute.setAtlassianToken", () => setAtlassian(context)),
+    vscode.commands.registerCommand("hyperexecute.addToConfluence", () => studio.publishConfluence()),
     vscode.commands.registerCommand("hyperexecute.setAnthropicKey", () => setAnthropicKey(context)),
     vscode.commands.registerCommand("hyperexecute.chooseBackend", () => chooseBackend(context)),
     vscode.commands.registerCommand("hyperexecute.validateActiveFile", () => validateActive()),
@@ -410,11 +411,23 @@ class Studio {
       case "reloadWindow":
         await vscode.commands.executeCommand("workbench.action.reloadWindow");
         break;
+      case "publishConfluence":
+        await this.publishConfluence();
+        break;
       case "clearChat":
         this.state.chat = [];
         this.push();
         break;
     }
+  }
+
+  // What was done per repo in this window, for "Add to Confluence".
+  logStep(step, detail) {
+    if (!this.state.repo) return;
+    this.journals ||= new Map();
+    const list = this.journals.get(this.state.repo) || [];
+    list.push({ at: Date.now(), step, detail: detail ? String(detail).slice(0, 300) : undefined });
+    this.journals.set(this.state.repo, list.slice(-100));
   }
 
   async analyze(repoPath) {
@@ -426,6 +439,7 @@ class Studio {
       this.state.profileFull = c.analyzeRepo(repoPath);
       this.state.profile = c.summarizeProfile(this.state.profileFull, 25);
       this.state.scan = c.scanRepo(repoPath);
+      this.logStep("Analyzed the repo", `${this.state.profileFull.primaryFramework || "no framework"} · ${this.state.scan.credentials.length} hard-coded credential(s)`);
       this.state.discoveredUnits = null;
       // this repo's own saved options win; a repo seen for the first time starts from the user's usual settings
       const saved = this.context.workspaceState.get(this.optionsKey());
@@ -607,6 +621,7 @@ class Studio {
     }
     fs.writeFileSync(target.fsPath, this.state.yaml);
     this.state.existingFile = this.outputName();
+    this.logStep("Saved the YAML", this.outputName());
     this.toast(`Saved ${this.outputName()}`);
     this.push();
     if (openAfter) await vscode.window.showTextDocument(target, { preview: false });
@@ -674,6 +689,7 @@ class Studio {
     await vscode.workspace.applyEdit(edit);
     for (const d of docs) await d.save();
     this.toast(`Replaced ${n} credential(s) in ${plans.length} file(s)`);
+    this.logStep("Moved hard-coded credentials to environment variables", `${n} in ${plans.length} file(s)`);
     this.state.scan = c.scanRepo(this.state.repo);
     this.push();
   }
@@ -693,6 +709,66 @@ class Studio {
     this.post({ type: "caps", result: { ...r, points } });
   }
 
+  // ---------- Add to Confluence: a page documenting what was done for this repo ----------
+  async publishConfluence() {
+    if (!this.state.repo) return this.toast("Open a repo first");
+    const c = await loadCore();
+    let { email, token } = await applyAtlassianEnv(this.context);
+    if (!email || !token) {
+      await setAtlassian(this.context);
+      ({ email, token } = await applyAtlassianEnv(this.context));
+      if (!email || !token) return;
+    }
+    const cfg = vscode.workspace.getConfiguration("hyperexecute");
+    const space = cfg.get("confluencePublishSpace") || "HYP";
+    const doc = c.buildSetupReport(this.reportSession());
+    const pick = await vscode.window.showInformationMessage(
+      `Create a Confluence page in space ${space}?`,
+      { modal: true, detail: `"${doc.title}"\n\nIt documents what was done for this repo: analysis, the YAML (credentials as secret references), runs, problems and fixes, what was learned and next steps.` },
+      "Create page",
+      "Preview"
+    );
+    if (pick === "Preview") {
+      const md = await vscode.workspace.openTextDocument({ language: "markdown", content: doc.markdown });
+      await vscode.window.showTextDocument(md, { preview: true });
+      return this.toast("This is the page content. Click Add to Confluence again to create it.");
+    }
+    if (pick !== "Create page") return;
+    this.busy("Creating the Confluence page…");
+    try {
+      const page = await c.createConfluencePage({ title: doc.title, storage: doc.storage, space, parentId: cfg.get("confluenceParentPageId") || undefined });
+      c.cacheConfluencePage({ id: page.id, title: page.title, url: page.url, space: page.space, version: 1, content: doc.markdown });
+      this.logStep("Added the setup to Confluence", page.url);
+      const open = await vscode.window.showInformationMessage(`Created "${page.title}" in Confluence.`, "Open page");
+      if (open) vscode.env.openExternal(vscode.Uri.parse(page.url));
+    } catch (e) {
+      this.toast(`Couldn't create the page: ${e.message}`, "error");
+    } finally {
+      this.busy();
+    }
+  }
+
+  reportSession() {
+    const runs = this.state.run?.history || [];
+    const steps = this.journals?.get(this.state.repo) || [];
+    let connection = [];
+    try { connection = core.findDriverSetup(this.state.repo, this.state.profileFull); } catch {}
+    return {
+      repoName: path.basename(this.state.repo),
+      profile: this.state.profile,
+      yaml: this.state.yaml,
+      yamlFile: this.outputName(),
+      validation: this.state.validation,
+      options: this.state.options,
+      runs,
+      activity: steps,
+      connection,
+      scan: this.state.scan && { credentials: this.state.scan.credentials.length, credentialsFixed: 0, reporting: [...new Set((this.state.scan.reporting || []).map((x) => x.name).filter(Boolean))] },
+      team: core.readTeamMemory?.(this.state.repo),
+      learned: runs.map((h) => h.learned).filter(Boolean),
+    };
+  }
+
   // ---------- optimizer ----------
   async optimize() {
     const c = await loadCore();
@@ -703,6 +779,7 @@ class Studio {
   async applyOptimizations(ids) {
     const c = await loadCore();
     const r = c.applyOptimizations(this.state.yaml, ids, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits });
+    this.logStep("Applied optimizations", Array.isArray(ids) ? ids.join(", ") : "all");
     if (Object.keys(r.regenerate).length) {
       this.state.options = clean({ ...this.state.options, ...r.regenerate, ...(r.regenerate.splitBy ? { executionMode: "autosplit" } : {}) });
       this.regenerate();
@@ -769,6 +846,7 @@ class Studio {
     run.tail = "";
     run.config = config || this.outputName();
     run.targeted = run.config !== this.outputName();
+    this.logStep(`Started run ${run.attempt}${run.targeted ? " (affected tests only)" : ""}`);
     this.push();
     const ch = this.output();
     ch.appendLine(`\n===== Attempt ${run.attempt}${run.targeted ? " (affected tests only)" : ""} — ${new Date().toLocaleTimeString()} =====`);
@@ -807,14 +885,21 @@ class Studio {
     if (run.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(run.status)) run.status = "needs-attention";
     run.jobUrl = run.jobUrl || d.jobUrl;
     run.diagnosis = c.describeDiagnosis(d);
+    const passed = ["passed", "passed-with-failures"].includes(run.status);
+    run.failure = passed ? null : { headline: c.headline(evidence.text), ruleIds: d.diagnoses.map((x) => x.id), title: d.diagnoses[0]?.title };
+    run.fixedBefore = run.failure ? c.findLearnedFix({ repo: this.state.repo, ...run.failure }) : null;
+    // passed after a YAML fix: remember the failure and the change that fixed it
+    run.learned = !r.stopped && passed && run.pendingFix ? c.recordFixThatWorked({ repo: this.state.repo, ...run.pendingFix, profile: this.state.profileFull, jobId: d.jobId }) : null;
+    run.pendingFix = null;
     if (!r.stopped) {
       const { accessKey } = await this.ltAccount();
       run.savedForReview = !!c.recordUnmatched({ source: "studio-run", diagnosis: { ...d, status: run.status }, logText: evidence.text, profile: this.state.profileFull, yamlText, secrets: [accessKey] });
       c.recordOutcome({ event: "result", runId: `studio-${run.startedAt}-${run.attempt}`, attempt: run.attempt, status: run.status, ruleIds: d.diagnoses.map((x) => x.id), discovery: run.discoveryCheck.verdict, framework: this.state.profileFull.primaryFramework });
     }
     run.logFiles = evidence.files;
-    const entry = { attempt: run.attempt, targeted: !!run.targeted, tests: d.tests, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [] };
+    const entry = { attempt: run.attempt, targeted: !!run.targeted, tests: d.tests, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [], problems: passed ? [] : d.diagnoses, headline: run.failure?.headline, learned: run.learned || undefined };
     run.history.push(entry);
+    this.logStep(`Run ${run.attempt} finished`, `${run.status}${d.diagnoses.length ? ` · ${d.diagnoses.map((x) => x.title).join("; ")}` : ""}${run.learned ? " · fix remembered" : ""}`);
     this.push();
     if (r.stopped) return;
     if (["fixable", "fixable-tests"].includes(run.status) && run.auto && d.canAutoFix) {
@@ -886,6 +971,7 @@ class Studio {
     if (plan.pipeline) {
       if (plan.pipeline === "ask") return reply("Which CI? Say GitHub Actions, GitLab, Jenkins or Azure DevOps.");
       const p = c.generatePipeline({ ci: plan.pipeline, configFile: this.outputName(), yaml: this.state.yaml });
+      this.logStep("Prepared a CI pipeline", p.path);
       const doc = await vscode.workspace.openTextDocument({ content: p.content, language: p.path.endsWith("Jenkinsfile") ? "groovy" : "yaml" });
       await vscode.window.showTextDocument(doc, { preview: false });
       return reply(`Opened **${p.path}** for ${p.name} in an editor tab. Save it at that path in the repo.\n${p.notes.map((n) => `- ${n}`).join("\n")}`);
@@ -899,6 +985,7 @@ class Studio {
     const d = this.lastDiagnosis;
     if (!d) return;
     const run = this.state.run;
+    const before = this.state.yaml;
     let r = c.applyDiagnosisFixes(this.state.yaml, d, ids, values);
     if (Object.keys(r.options).length) {
       this.state.options = clean({ ...this.state.options, ...r.options });
@@ -913,6 +1000,8 @@ class Studio {
       return this.toast(`Fixed YAML has errors: ${this.state.validation.errors[0]}`, "error");
     }
     run.history[run.history.length - 1].changes.push(...r.applied);
+    run.pendingFix = { failure: run.failure, before, after: this.state.yaml, how: "rules", applied: r.applied };
+    this.logStep("Fixed the YAML", r.applied.join("; "));
     this.state.overwriteOk = true;
     await this.save(false);
     this.state.dirty = false;
@@ -947,6 +1036,7 @@ class Studio {
         task: "A HyperExecute job failed. Propose the YAML change that fixes it (replace_yaml with the full corrected YAML, or update_options). If the failure is in the tests or application, answer_only and explain.",
         currentYaml: this.state.yaml,
         diagnosis: run.diagnosis,
+        fixedBefore: run.fixedBefore ? { note: "This failure was fixed before with this YAML change and the next run passed. Prefer it if it fits.", change: run.fixedBefore.change } : undefined,
         logDigest: c.logDigest(this.lastEvidence.text),
         analysis: c.summarizeProfile(this.state.profileFull, 10),
       };
@@ -976,6 +1066,7 @@ class Studio {
     const run = this.state.run;
     const s = run.aiSuggestion;
     if (!s) return;
+    const before = this.state.yaml;
     if (s.options) {
       this.state.options = s.options;
       this.regenerate();
@@ -984,6 +1075,8 @@ class Studio {
       this.state.validation = strip(c.validateYaml(s.yaml, this.state.repo));
     } else return this.toast("The AI suggestion isn't a valid YAML change", "error");
     run.history[run.history.length - 1].changes.push(`AI: ${s.reply.slice(0, 120)}`);
+    run.pendingFix = { failure: run.failure, before, after: this.state.yaml, how: "ai", applied: [`AI: ${s.reply.slice(0, 120)}`] };
+    this.logStep("Fixed the YAML with the AI's change", s.reply.slice(0, 160));
     run.aiSuggestion = null;
     this.state.overwriteOk = true;
     await this.save(false);

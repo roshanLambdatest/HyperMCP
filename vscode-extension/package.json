@@ -25,6 +25,10 @@
         "icon": "$(rocket)"
       },
       {
+        "command": "hyperexecute.addToConfluence",
+        "title": "HyperExecute: Add to Confluence (document what was done)"
+      },
+      {
         "command": "hyperexecute.setAtlassianToken",
         "title": "Connect Confluence (Atlassian token)",
         "category": "HyperExecute"
@@ -136,6 +140,16 @@
           "type": "string",
           "default": "HYP",
           "description": "Confluence space key(s), comma-separated."
+        },
+        "hyperexecute.confluencePublishSpace": {
+          "type": "string",
+          "default": "HYP",
+          "description": "Space for pages made with Add to Confluence."
+        },
+        "hyperexecute.confluenceParentPageId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: id of the Confluence page that Add to Confluence pages are created under."
         },
         "hyperexecute.outputFileName": {
           "type": "string",

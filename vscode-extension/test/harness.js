@@ -12,6 +12,9 @@ let onMessage;
 let viewProvider;
 const fixture = (n) => path.join(__dirname, "..", "..", "test", "fixtures", n);
 const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "he-repo-"));
+// learning and caches go to a throwaway folder, not the developer's ~/.hyperexecute-studio
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
+Object.assign(process.env, { HE_STATE_DIR: stateDir, HE_KB_CACHE_DIR: path.join(stateDir, "kb-cache"), HE_FEEDBACK_DIR: path.join(stateDir, "feedback") });
 fs.cpSync(fixture(process.env.FIXTURE || "maven-cucumber"), tmpRepo, { recursive: true });
 
 const vscodeStub = {
@@ -30,7 +33,7 @@ const vscodeStub = {
       onDidDispose: () => {}, reveal: () => {},
     }),
     showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => ["Overwrite", "Regenerate", "Replace", "Apply", "Download it"].includes(x)); },
-    showInformationMessage: async () => {}, showErrorMessage: async (m) => console.log("  [error]", m),
+    showInformationMessage: async (...a) => (a.includes("Create page") ? "Create page" : undefined), showErrorMessage: async (m) => console.log("  [error]", m),
     createStatusBarItem: () => ({ show() {}, dispose() {} }),
     registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
     showTextDocument: async () => {}, createOutputChannel: () => ({ append() {}, appendLine() {}, show() {} }), createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
@@ -150,6 +153,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     let r = lastState().run;
     console.log("  auto history:", r.history.map((x) => `#${x.attempt} ${x.status} ${x.changes.join(";")}`).join(" | "));
     check("auto: failed → tunnel fix → rerun → passed", r.status === "passed" && r.history.length === 2 && /tunnel/i.test(r.history[0].changes.join()) && /tunnel: true/.test(fs.readFileSync(path.join(tmpRepo, "hyperexecute.yaml"), "utf8")));
+    check("learning: the tunnel fix is remembered", r.learned?.change?.added.some((l) => /tunnel: true/.test(l)) && fs.existsSync(path.join(stateDir, "learned-fixes.json")), JSON.stringify(r.learned));
     const logText = posted.filter((m) => m.type === "runLog").map((m) => m.chunk).join("");
     check("live log streamed, access key masked", /Job Link/.test(logText) && !logText.includes("super-secret-key-42") && logText.includes("****"));
     check("job link captured", /jobId=1b2c3d4e/.test(r.jobUrl || ""), r.jobUrl);
@@ -159,9 +163,30 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     await send({ type: "run", auto: false, maxAttempts: 3 });
     r = lastState().run;
     check("manual: stops at fixable with diagnosis", r.status === "fixable" && r.diagnosis.diagnoses[0].id === "private-network" && r.history.length === 1, JSON.stringify(r.diagnosis));
+    check("learning: the same failure shows the fix that worked before", r.fixedBefore?.change?.added.some((l) => /tunnel: true/.test(l)), JSON.stringify(r.fixedBefore));
     await send({ type: "runApplyFixes", rerun: true });
     r = lastState().run;
     check("manual: Apply fixes & rerun → passed", r.status === "passed" && r.attempt === 2);
+    // Add to Confluence, against a stand-in Confluence
+    const http = require("http");
+    const created = [];
+    const conf = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c)).on("end", () => {
+        res.setHeader("Content-Type", "application/json");
+        if (req.url.startsWith("/wiki/rest/api/user/current")) return res.end(JSON.stringify({ type: "known", displayName: "Tester" }));
+        if (req.url.startsWith("/wiki/api/v2/spaces")) return res.end(JSON.stringify({ results: [{ id: "77" }] }));
+        if (req.url === "/wiki/api/v2/pages") { created.push(JSON.parse(body)); return res.end(JSON.stringify({ id: "5", title: created[0].title, _links: { base: "http://confluence.test/wiki", webui: "/pages/5" } })); }
+        res.statusCode = 404; res.end("{}");
+      });
+    });
+    await new Promise((ok) => conf.listen(0, "127.0.0.1", ok));
+    Object.assign(settings, { atlassianEmail: "qa@example.com", confluenceBaseUrl: `http://127.0.0.1:${conf.address().port}/wiki` });
+    secrets.set("hyperexecute.atlassianToken", "atl-token-xyz");
+    await send({ type: "publishConfluence" });
+    const pg = created[0]?.body?.value || "";
+    check("Add to Confluence: page with runs, fixes and learning, no secrets", created.length === 1 && /<h2>Runs<\/h2>/.test(pg) && /Fixed the YAML/.test(pg) && /Learned from this session/.test(pg) && !pg.includes("super-secret-key-42") && !/\btester\b/.test(pg), pg.slice(0, 400));
+    conf.close();
   }
   if (process.env.WATCH_AI) {
     process.env.HE_CLI_PATH = path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute.sh");

@@ -15,14 +15,15 @@ import { loadCreds, saveCreds, verifyCreds, CREDS_FILE } from "./credentials.js"
 import { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiagnosis, buildTargetedRerun, fixableSelectors } from "./doctor.js";
 import { validateYaml } from "./validator.js";
 import { searchKnowledge, listTopics, getTopic, KB_DIRS, cacheConfluencePage, cacheStatus } from "./knowledge.js";
-import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI } from "./confluence.js";
+import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI, createConfluencePage } from "./confluence.js";
 import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } from "./security.js";
 import { capabilityOptions, generateConnection, findDriverSetup, planConnectionChanges } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
-import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir } from "./feedback.js";
+import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir, headline } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
-import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
+import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
+import { buildSetupReport } from "./report.js";
 
 // Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
 const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
@@ -35,12 +36,14 @@ Workflow for "set up HyperExecute" (or anything like it):
 5. Write the file (write: true) only after the user agrees. Offer generate_ci_pipeline when they want runs from CI.
 6. run_hyperexecute_job, then get_hyperexecute_run until done. Follow its "next". On fixable failures use fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test-failures (code bugs) or auth errors: report them.
 7. A green run with discoveryCheck "zero-tests" is a failure: fix discovery before calling it done.
+8. When the user wants the work documented or shared ("add to Confluence"), publish_to_confluence (preview: true first if they want to see it).
 
 Rules that matter:
 - YAML v0.2 (framework:) exists only for Maven/Gradle TestNG, JUnit 4/5, Spock and .NET NUnit/MSTest, and must never contain testDiscovery (the job would run 0 tests). Tags, files, features, scenarios, matrix mode and custom commands need v0.1.
 - runson is linux, mac, mac13, win or win11. Cross-browser or multi-OS = matrix axes in v0.1.
 - Values the tests read (BASE_URL…) come from the user: ask, never invent. Secrets stay \${{ .secrets.X }} unless the user saved their own LambdaTest account.
 - When no rule explains a failure, read the logDigest, propose a minimal YAML change, validate it, then fix_and_rerun_hyperexecute with yamlContent. Unrecognized failures are saved for review_diagnosis_feedback.
+- Learning from what worked: when a fix makes the next run pass, the failure and the YAML change are remembered automatically (this machine + the repo's team memory). When get_hyperexecute_run or diagnose_hyperexecute_logs returns fixedBefore, try that change first if it fits the YAML.
 - When the user states a lasting decision for this repo ("always win11", "use the ci profile", "staging needs the tunnel") or corrects the YAML in a way that should stick, call remember_for_team so every teammate's agent gets it.
 - Grid connection: generate_lambdatest_capabilities finds where the repo connects. Tell the user those file:line locations; change the existing code in place only when asked. Never create a new helper or connection file.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
@@ -52,6 +55,14 @@ const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${
 
 // Default repo = HE_DEFAULT_REPO or the first workspace root the client opened the server in.
 const resolveRepo = (p) => path.resolve(p || process.env.HE_DEFAULT_REPO || process.cwd());
+
+// What was done per repo in this session, for the Confluence record (publish_to_confluence).
+const activity = new Map();
+function logStep(repo, step, detail) {
+  const list = activity.get(repo) || [];
+  list.push({ at: Date.now(), step, detail: detail ? String(detail).slice(0, 300) : undefined });
+  activity.set(repo, list.slice(-100));
+}
 
 // ---------- tools ----------
 
@@ -67,6 +78,7 @@ server.registerTool(
     try {
       const repo = resolveRepo(repoPath);
       const summary = summarizeProfile(analyzeRepo(repo));
+      logStep(repo, "Analyzed the repo", `${summary.primaryFramework || "no framework"} · confidence ${summary.confidence?.level}`);
       const team = readTeamMemory(repo);
       if (team) summary.teamMemory = { file: TEAM_FILE, options: team.options, notes: team.notes, lastPassing: team.passingSetups[0] };
       return text(summary);
@@ -146,6 +158,7 @@ server.registerTool(
         fs.writeFileSync(out, result.yaml);
         written = out;
       }
+      logStep(repo, written ? "Wrote the YAML" : "Generated a YAML", `${path.basename(written || "preview")} · v${result.yamlVersion} · split by ${result.splitBy}${validation.valid ? "" : " · has validation errors"}`);
       // the written file has the real key; the chat only sees it masked
       const key = embeddedCredentials(args)?.accessKey;
       const shown = key ? result.yaml.split(key).join(key.slice(0, 3) + "****") : result.yaml;
@@ -193,6 +206,7 @@ server.registerTool(
       const content = yamlContent ?? fs.readFileSync(path.resolve(resolveRepo(repoPath), yamlPath || "hyperexecute.yaml"), "utf8");
       const r = validateYaml(content, repoPath ? resolveRepo(repoPath) : yamlPath ? path.dirname(path.resolve(resolveRepo(repoPath), yamlPath)) : undefined);
       delete r.parsed;
+      logStep(resolveRepo(repoPath), "Validated the YAML", r.valid ? `valid${r.warnings.length ? `, ${r.warnings.length} warning(s)` : ""}` : `${r.errors.length} error(s)`);
       return text(r);
     } catch (e) {
       return fail(e);
@@ -235,6 +249,7 @@ server.registerTool(
       }
       const r = await sh(command, repo);
       const items = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      logStep(repo, "Checked test discovery locally", `${items.length} test unit(s) found`);
       const dupes = items.length - new Set(items).size;
       // Remembered so the real run can be compared with it (see discoveryCheck in get_hyperexecute_run).
       if (r.code === 0) saveDryRun(repo, yamlPath || "hyperexecute.yaml", { command, discovered: items.length, items });
@@ -345,7 +360,10 @@ server.registerTool(
   },
   async ({ repoPath }) => {
     try {
-      return text(scanRepo(resolveRepo(repoPath)));
+      const repo = resolveRepo(repoPath);
+      const r = scanRepo(repo);
+      logStep(repo, "Scanned for credentials and reporting", `${r.credentials?.length || 0} hard-coded credential(s)${r.reporting?.length ? `, reports to ${[...new Set(r.reporting.map((x) => x.name))].slice(0, 4).join(", ")}` : ""}`);
+      return text(r);
     } catch (e) {
       return fail(e);
     }
@@ -370,7 +388,10 @@ server.registerTool(
         const a = p.after.split("\n");
         return `--- ${p.file}\n` + a.map((l, i) => (l !== b[i] ? `- ${b[i] ?? ""}\n+ ${l}` : null)).filter(Boolean).join("\n");
       });
-      if (!dryRun) applyCredentialFixes(repo, plans);
+      if (!dryRun) {
+        applyCredentialFixes(repo, plans);
+        logStep(repo, "Moved hard-coded credentials to environment variables", `${plans.length} file(s)`);
+      }
       const manual = findings.filter((f) => !f.autoFix).map((f) => `${f.file}:${f.line} (${f.kind}) — edit by hand or read from env`);
       return text(`${dryRun ? "DRY RUN — nothing written." : `Wrote ${plans.length} file(s).`}\n\n${diff.join("\n\n") || "No auto-fixable credentials."}${manual.length ? `\n\nManual:\n- ${manual.join("\n- ")}` : ""}`);
     } catch (e) {
@@ -414,6 +435,7 @@ server.registerTool(
       const profile = analyzeRepo(repo);
       const conn = generateConnection(profile, opts);
       const points = planConnectionChanges(findDriverSetup(repo, profile), conn);
+      logStep(repo, "Found where the tests connect", `${points.length} place(s), ${points.filter((p) => p.usesLambdaTest).length} on LambdaTest`);
       const noGrid = ["cypress", "testcafe"].includes(profile.primaryFramework);
       const out = [];
       if (!points.length) {
@@ -509,6 +531,17 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     rec.discoveryCheck = checkDiscovery({ repo, yamlPath: mainConfig, yamlText, profile, output: r.output, tests: evidence.tests, targeted: rec.targeted });
     // A green job that ran nothing is the expensive failure — don't report it as passed.
     if (rec.discoveryCheck.verdict === "zero-tests" && ["passed", "passed-with-failures", "unknown"].includes(rec.status)) rec.status = "needs-attention";
+    const ruleIds = rec.diagnosis.diagnoses.map((x) => x.id);
+    if (!["passed", "passed-with-failures"].includes(rec.status)) {
+      rec.failure = { headline: headline(evidence.text), ruleIds, title: rec.diagnosis.diagnoses[0]?.title };
+      rec.learnedFix = findLearnedFix({ repo, ...rec.failure });
+    }
+    // this run passed after a YAML fix: remember the failure and the change that fixed it
+    const prev = parent && runs.get(parent);
+    if (!r.stopped && ["passed", "passed-with-failures"].includes(rec.status) && prev?.fixedWith && prev.failure) {
+      rec.learned = recordFixThatWorked({ repo, failure: prev.failure, ...prev.fixedWith, profile, jobId: rec.diagnosis.jobId });
+    }
+    logStep(repo, `Run ${attempt}${rec.targeted ? " (affected tests only)" : ""} finished`, `${rec.status}${rec.diagnosis.diagnoses.length ? ` · ${rec.diagnosis.diagnoses.map((x) => x.title).join("; ")}` : ""}${rec.learned ? " · fix remembered" : ""}`);
     if (!r.stopped && rec.status === "passed" && !rec.targeted) {
       rec.savedCase = saveSuccessCase({ repo, yamlText, profile, jobId: rec.diagnosis.jobId });
       const ran = readOptionsFromYaml(yamlText);
@@ -521,6 +554,7 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     }
   });
   runs.set(id, rec);
+  logStep(repo, `Started run ${attempt}`, config);
   return rec;
 }
 
@@ -547,6 +581,8 @@ function runView(rec, tailChars = 3000) {
     diagnosis: d,
     discoveryCheck: rec.discoveryCheck && rec.discoveryCheck.verdict !== "ok" ? rec.discoveryCheck : rec.discoveryCheck ? { verdict: "ok", platformDiscovered: rec.discoveryCheck.platformDiscovered, executedTests: rec.discoveryCheck.executedTests } : undefined,
     savedAsAccuracyCase: rec.savedCase ? "This passing setup was saved as an accuracy case, so future versions are checked against it." : undefined,
+    fixedBefore: rec.learnedFix ? { how: rec.learnedFix.how === "rules" ? "a built-in rule's fix" : "a YAML change", worked: rec.learnedFix.worked, from: rec.learnedFix.from, change: rec.learnedFix.change, note: "This failure was fixed before by this change and the next run passed. Try the same change first (fix_and_rerun_hyperexecute with yamlContent), after checking it fits this YAML." } : undefined,
+    learned: rec.learned ? "The fix applied before this run made it pass: it's remembered (here and in the repo's team memory) for the next time this failure appears." : undefined,
     teamMemory: rec.teamFile ? `Team memory updated (${TEAM_FILE}): commit it so teammates' agents start from this passing setup.` : undefined,
     savedForReview: rec.feedbackFile ? "The unexplained part of this failure was saved (masked) for rule review — see review_diagnosis_feedback." : undefined,
     logFiles: rec.evidence?.files,
@@ -675,6 +711,8 @@ server.registerTool(
       const v = validateYaml(next, rec.repo);
       if (!v.valid) throw new Error(`Fixed YAML doesn't validate: ${v.errors.join(" | ")}`);
       fs.writeFileSync(file, next);
+      rec.fixedWith = { before, after: next, how: yamlContent ? "custom" : "rules", applied };
+      logStep(rec.repo, "Fixed the YAML", applied.join("; "));
       const out = { applied, written: file };
       const ruleIds = (rec.diagnosis?.diagnoses || []).map((x) => x.id).concat((rec.diagnosis?.tests?.list || []).map((t) => t.rule).filter(Boolean));
       if (rerun) {
@@ -724,6 +762,9 @@ server.registerTool(
       const profile = analyzeRepo(repo);
       const d = diagnose({ evidence: collectEvidence({ output: text_ }), yamlText, profile, exitCode: 1, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
       const out = { diagnosis: describeDiagnosis(d) };
+      const seen = findLearnedFix({ repo, headline: headline(text_), ruleIds: d.diagnoses.map((x) => x.id) });
+      if (seen) out.fixedBefore = { worked: seen.worked, from: seen.from, change: seen.change, note: "This failure was fixed before by this YAML change and the next run passed. Try it first, after checking it fits this YAML." };
+      logStep(repo, "Diagnosed a job log", d.diagnoses.map((x) => x.title).join("; ") || d.status);
       if (recordUnmatched({ source: "pasted-logs", diagnosis: d, logText: text_, profile, yamlText })) out.savedForReview = "Unrecognized failure saved (masked) for rule review — see review_diagnosis_feedback.";
       if (d._fixes.length && yamlText) {
         const r = applyDiagnosisFixes(yamlText, d);
@@ -768,6 +809,7 @@ server.registerTool(
         fs.writeFileSync(out, p.content);
         written = `\nWritten: ${p.path}`;
       }
+      logStep(repo, write ? "Added a CI pipeline" : "Prepared a CI pipeline", `${ci}${write ? ` · ${p.path}` : ""}`);
       const missing = yaml ? "" : `\n(${yamlPath} not found yet — generate and write it first)`;
       return text(`${p.name} → ${p.path}${written}${missing}\n\n\`\`\`\n${p.content}\`\`\`\n\nNotes:\n- ${p.notes.join("\n- ")}`);
     } catch (e) {
@@ -794,7 +836,67 @@ server.registerTool(
     try {
       const repo = resolveRepo(repoPath);
       const r = rememberForTeam(repo, { options, unset, note, removeNote });
+      logStep(repo, "Saved a team decision", [note, options && Object.keys(options).join(", ")].filter(Boolean).join(" · "));
       return text({ file: r.file, options: r.memory.options, notes: r.memory.notes, rejected: r.rejected.length ? r.rejected : undefined, next: `Commit ${TEAM_FILE} so the team gets it.` });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+// Everything known about this repo's setup in this session, for the Confluence record.
+function setupSession(repo, yamlPath = "hyperexecute.yaml") {
+  const file = path.resolve(repo, yamlPath);
+  const yaml = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const profile = analyzeRepo(repo);
+  const steps = activity.get(repo) || [];
+  const mine = [...runs.values()].filter((r) => r.repo === repo).sort((a, b) => a.startedAt - b.startedAt);
+  const scanned = steps.some((a) => /Scanned for credentials/.test(a.step));
+  const scan = scanned ? scanRepo(repo) : null;
+  let connection = [];
+  try { connection = findDriverSetup(repo, profile); } catch {}
+  return {
+    repoName: path.basename(repo),
+    profile: summarizeProfile(profile, 10),
+    yaml,
+    yamlFile: yamlPath,
+    validation: yaml ? validateYaml(yaml, repo) : null,
+    runs: mine.map((r) => {
+      const v = runView(r);
+      return { attempt: r.attempt, status: r.status, targeted: r.targeted, durationSec: v.elapsedSec, jobUrl: v.jobUrl, tests: r.diagnosis?.tests, changes: r.fixedWith?.applied, problems: ["passed", "running"].includes(r.status) ? [] : r.diagnosis?.diagnoses || [], headline: r.failure?.headline };
+    }),
+    activity: steps,
+    connection,
+    scan: scan && { credentials: scan.credentials?.length || 0, credentialsFixed: steps.some((a) => /Moved hard-coded credentials/.test(a.step)) ? (scan.credentials || []).filter((c) => c.autoFix).length : 0, reporting: [...new Set((scan.reporting || []).map((x) => x.name).filter(Boolean))] },
+    team: readTeamMemory(repo),
+    learned: mine.map((r) => r.learned).filter(Boolean),
+  };
+}
+
+server.registerTool(
+  "publish_to_confluence",
+  {
+    title: "Add this setup to Confluence",
+    description:
+      "Create a Confluence page that documents what was done for this repo in this session: analysis, the HyperExecute YAML (credentials as secret references), checks, every run with its status and job link, problems and how they were fixed, fixes the agent learned, grid connection points, credentials/reporting findings, team decisions and next steps. USE when the user asks to document the work, \"add to Confluence\" or share it with the team. preview:true returns the document without creating anything. Needs ATLASSIAN_EMAIL / ATLASSIAN_API_TOKEN; the page always goes to the configured space (CONFLUENCE_PUBLISH_SPACE, default HYP), under parentId if given. Each call creates a new page.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      yamlPath: z.string().optional().describe("Default hyperexecute.yaml"),
+      title: z.string().optional().describe("Default: HyperExecute setup: <repo> (<date time>)"),
+      parentId: z.string().optional().describe("Id of the page to create it under"),
+      preview: z.boolean().optional().describe("Return the document (Markdown) without creating a page"),
+    },
+  },
+  async ({ repoPath, yamlPath, title, parentId, preview }) => {
+    try {
+      const repo = resolveRepo(repoPath);
+      const doc = buildSetupReport(setupSession(repo, yamlPath), { title });
+      if (preview) return text(`${doc.markdown}\n\n---\nNot published. Call again without preview to create the page "${doc.title}".`);
+      const page = await createConfluencePage({ title: doc.title, storage: doc.storage, parentId });
+      // the page becomes searchable knowledge too, so later sessions learn from it
+      cacheConfluencePage({ id: page.id, title: page.title, url: page.url, space: page.space, version: 1, content: doc.markdown });
+      logStep(repo, "Added the setup to Confluence", page.url);
+      return text({ created: page.title, url: page.url, space: page.space, note: "The page is also saved to the local knowledge base, so search_knowledge_base finds it." });
     } catch (e) {
       return fail(e);
     }

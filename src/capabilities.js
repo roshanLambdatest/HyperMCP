@@ -261,7 +261,7 @@ DRIVER = new RemoteWebDriver(new Uri("${hub}"), browserOptions);`;
   } else if (profile.language === "node" && fw === "playwright") {
     language = "js";
     hub = "wss://cdp.lambdatest.com/playwright";
-    caps = { browserName: caps.browserName === "Safari" ? "pw-webkit" : caps.browserName, browserVersion: caps.browserVersion, "LT:Options": { platform: lt.platformName, build: lt.build, project: lt.project, video: lt.video, network: lt.network, console: lt.console, tunnel: lt.tunnel, plugin: lt.plugin } };
+    caps = { browserName: { Safari: "pw-webkit", Firefox: "pw-firefox" }[caps.browserName] || caps.browserName, browserVersion: caps.browserVersion, "LT:Options": { platform: lt.platformName, build: lt.build, project: lt.project, video: lt.video, network: lt.network, console: lt.console, tunnel: lt.tunnel, plugin: lt.plugin } };
     snippet = `const capabilities = ${jsWithCreds(caps, "user")};
 DRIVER = await chromium.connect(\`${hub}?capabilities=\${encodeURIComponent(JSON.stringify(capabilities))}\`);`;
   } else if (profile.language === "node" && fw === "webdriverio") {

@@ -64,7 +64,8 @@ sequenceDiagram
 | Stay safe | `scan_credentials_and_reporting`, `fix_hardcoded_credentials` | Hard-coded customer credentials and customer-side reporting (TestRail, Jira, Slack…) found before anything runs |
 | Connect to LambdaTest | `set_lambdatest_credentials`, `lambdatest_credentials_status`, `generate_lambdatest_capabilities` | One saved account used everywhere; finds where the tests connect and what to change there, from live browser/OS lists |
 | Know more | `search_knowledge_base`, `get_confluence_page`, `knowledge_base_status` | Search across the bundled notes, example YAMLs and Confluence, with synonyms |
-| Get better | `review_diagnosis_feedback` | Failures it didn't recognize, grouped, so they become new rules |
+| Get better | `review_diagnosis_feedback`, `remember_for_team` | Failures it didn't recognize, grouped, so they become new rules; team decisions saved in the repo |
+| Document | `publish_to_confluence` | A Confluence page of everything done for the repo: YAML, runs, problems and fixes, what was learned, next steps |
 
 **Claude** turns a request in plain words into the right tool calls, and handles whatever the rules don't cover:
 
@@ -107,6 +108,7 @@ Claude alone can write a YAML that looks right; HyperExecute Studio catches the 
 | `get_hyperexecute_run` | Live log tail while running; when finished, a diagnosis (passed / fixable / test-failures / auth-error / needs-attention / unknown) with evidence and proposed YAML fixes |
 | `fix_and_rerun_hyperexecute` | Applies the diagnosis fixes (or your YAML), validates, writes, and starts the next attempt. Per test: code failures are left alone; tests that failed for YAML/environment reasons get the fix and are rerun on their own. Takes `values` for env vars the tests need. Refuses for code-only failures, login errors, or after max attempts |
 | `diagnose_hyperexecute_logs` | Diagnoses pasted logs or a downloaded log folder and returns the corrected YAML |
+| `publish_to_confluence` | Creates a Confluence page documenting this session for the repo: what was done step by step, the YAML (credentials only as secret references), validation, every run with status and job link, problems and how they were fixed, fixes the agent learned, grid connection points, credentials/reporting findings, team decisions and next steps. `preview: true` shows it without creating anything. Pages go to the HYP space (`CONFLUENCE_PUBLISH_SPACE`), under `CONFLUENCE_PARENT_ID` if set. The page is also added to the local knowledge base |
 | `review_diagnosis_feedback` | Groups the failures the rules didn't recognize (saved locally, masked) and shows how each rule's fixes worked out: applied, overridden, or the next attempt failed the same way. `markReviewed` clears a group once a rule covers it |
 
 Prompt: `create_hyperexecute_yaml` runs the whole workflow.
@@ -130,7 +132,7 @@ The server (named `hyperexecute`) analyzes the folder Claude Code is running in.
 **Fewer approval prompts.** To let Claude Code analyze, generate, validate, diagnose and remember without asking, while still asking before it starts a job, reruns one or edits your code or saved account, add this to `permissions` in `~/.claude/settings.json`:
 ```json
 "allow": ["mcp__hyperexecute__analyze_repo", "mcp__hyperexecute__generate_hyperexecute_yaml", "mcp__hyperexecute__validate_hyperexecute_yaml", "mcp__hyperexecute__dry_run_test_discovery", "mcp__hyperexecute__optimize_hyperexecute_yaml", "mcp__hyperexecute__search_knowledge_base", "mcp__hyperexecute__get_confluence_page", "mcp__hyperexecute__knowledge_base_status", "mcp__hyperexecute__scan_credentials_and_reporting", "mcp__hyperexecute__generate_lambdatest_capabilities", "mcp__hyperexecute__generate_ci_pipeline", "mcp__hyperexecute__get_hyperexecute_run", "mcp__hyperexecute__diagnose_hyperexecute_logs", "mcp__hyperexecute__lambdatest_credentials_status", "mcp__hyperexecute__review_diagnosis_feedback", "mcp__hyperexecute__remember_for_team"],
-"ask": ["mcp__hyperexecute__run_hyperexecute_job", "mcp__hyperexecute__fix_and_rerun_hyperexecute", "mcp__hyperexecute__fix_hardcoded_credentials", "mcp__hyperexecute__set_lambdatest_credentials"]
+"ask": ["mcp__hyperexecute__run_hyperexecute_job", "mcp__hyperexecute__fix_and_rerun_hyperexecute", "mcp__hyperexecute__fix_hardcoded_credentials", "mcp__hyperexecute__set_lambdatest_credentials", "mcp__hyperexecute__publish_to_confluence"]
 ```
 `generate_hyperexecute_yaml` and `generate_ci_pipeline` still write a file only when asked to (`write: true`).
 
@@ -142,6 +144,8 @@ Claude can't be retrained, but the agent around it learns from real use. Persona
 - **Claude Code skill.** `claude-skill/hyperexecute-studio/SKILL.md` loads automatically for anything about HyperExecute. Install it once: `mkdir -p ~/.claude/skills && cp -r claude-skill/hyperexecute-studio ~/.claude/skills/`.
 - **Team memory in the repo.** `.hyperexecute/team.json` in the tested repo holds what the team decided (OS, VMs, split, Maven profile, env values) and notes every teammate's agent should follow. Passing runs update it; `remember_for_team` saves a decision ("always win11 for this repo", "staging needs the tunnel"). Commit it and review changes like code. Precedence: explicit options, then team, then usual settings. Credentials are refused; `HE_TEAM_MEMORY=off` turns it off.
 - **Usual settings.** Options chosen the same way twice for a framework (OS, VMs, split, retries, timeout, tunnel) become the starting point for that framework. The reply says so; explicit options or `useLearned: false` override. The web version remembers them per browser.
+- **Fixes that worked.** When a run passes right after a YAML fix (a built-in rule's, the AI's or one written by hand), the failure and the exact YAML change are saved to `~/.hyperexecute-studio/learned-fixes.json` and to the repo's team memory. The next time the same failure shows up, for anyone on the team, the run result shows "Fixed before" with that change, and the agent tries it first.
+- **Add to Confluence.** The Studio's **Add to Confluence** button (or `publish_to_confluence` in Claude Code) turns what was done into a Confluence page, and the page joins the knowledge base, so later sessions can find how a similar repo was set up.
 - **Passing runs become accuracy cases.** Every job that passes saves its repo and YAML (credentials as references only) to `~/.hyperexecute-studio/accuracy-cases`, which `npm run accuracy` checks by default, so a change that breaks a setup that really worked is caught.
 - **Unrecognized failures** are saved for the weekly rule review (below).
 

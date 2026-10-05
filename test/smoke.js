@@ -32,7 +32,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status", "remember_for_team"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status", "remember_for_team", "publish_to_confluence"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -276,7 +276,21 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-learn-"));
   const repo5 = fs.mkdtempSync(path.join(os.tmpdir(), "he-learnrepo-"));
   fs.cpSync(fx("maven-testng"), repo5, { recursive: true });
-  const env = { ...process.env, HE_STATE_DIR: state, HE_LEARN: "", HE_ACCURACY_CASES: "", ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") };
+  // a stand-in Confluence that records the page it's asked to create
+  const http = await import("node:http");
+  const created = [];
+  const conf = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c)).on("end", () => {
+      res.setHeader("Content-Type", "application/json");
+      if (req.url.startsWith("/wiki/rest/api/user/current")) return res.end(JSON.stringify({ type: "known", displayName: "Tester" }));
+      if (req.url.startsWith("/wiki/api/v2/spaces")) return res.end(JSON.stringify({ results: [{ id: "77", key: "HYP" }] }));
+      if (req.url === "/wiki/api/v2/pages" && req.method === "POST") { const b = JSON.parse(body); created.push({ ...b, auth: req.headers.authorization }); return res.end(JSON.stringify({ id: "9001", title: b.title, _links: { base: "http://confluence.test/wiki", webui: "/spaces/HYP/pages/9001" } })); }
+      res.statusCode = 404; res.end("{}");
+    });
+  });
+  await new Promise((r) => conf.listen(0, "127.0.0.1", r));
+  const env = { ...process.env, HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "", HE_ACCURACY_CASES: "", ATLASSIAN_EMAIL: "qa@example.com", ATLASSIAN_API_TOKEN: "atl-token-xyz", CONFLUENCE_BASE_URL: `http://127.0.0.1:${conf.address().port}/wiki`, CONFLUENCE_SPACE: "HYP", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") };
   delete env.HE_ACCURACY_CASES;
   await client.close();
   await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));
@@ -343,6 +357,35 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   await call("remember_for_team", { repoPath: repo5, options: { splitBy: "nonsense-split" } });
   lg = await call("generate_hyperexecute_yaml", { repoPath: repo5 });
   check("team memory: a setting that doesn't fit is dropped, not an error", !lg.isError && /runson:/.test(lg.text), lg.text.slice(0, 300));
+
+  // learning from fixes that worked: fail (DNS) → fix (tunnel) → pass, then the same failure elsewhere gets the fix suggested
+  const repo6 = fs.mkdtempSync(path.join(os.tmpdir(), "he-fixlearn-"));
+  fs.cpSync(fx("maven-testng"), repo6, { recursive: true });
+  await call("generate_hyperexecute_yaml", { repoPath: repo6, yamlVersion: "0.1", write: true, embedCredentials: false, useLearned: false, extraEnv: { BASE_URL: "https://example.com" } });
+  const f1 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo6 })).text);
+  const f1d = JSON.parse((await call("get_hyperexecute_run", { runId: f1.runId, waitSeconds: 30 })).text);
+  const f2 = JSON.parse((await call("fix_and_rerun_hyperexecute", { runId: f1.runId })).text);
+  const f2d = JSON.parse((await call("get_hyperexecute_run", { runId: f2.nextRun.runId, waitSeconds: 30 })).text);
+  const learnedFile = path.join(state, "learned-fixes.json");
+  const lf = fs.existsSync(learnedFile) ? JSON.parse(fs.readFileSync(learnedFile, "utf8")) : [];
+  const team6 = JSON.parse(fs.readFileSync(path.join(repo6, ".hyperexecute", "team.json"), "utf8"));
+  check("learning: a fix that made the next run pass is remembered", f1d.status !== "passed" && f2d.status === "passed" && /remembered/.test(f2d.learned || "") && lf[0]?.change?.added.some((l) => /tunnel: true/.test(l)) && team6.fixesThatWorked?.[0]?.worked === 1, JSON.stringify({ s1: f1d.status, s2: f2d.status, learned: f2d.learned, lf: lf[0] }).slice(0, 600));
+  const repo7 = fs.mkdtempSync(path.join(os.tmpdir(), "he-fixlearn2-"));
+  fs.cpSync(fx("maven-testng"), repo7, { recursive: true });
+  await call("generate_hyperexecute_yaml", { repoPath: repo7, yamlVersion: "0.1", write: true, embedCredentials: false, useLearned: false, extraEnv: { BASE_URL: "https://example.com" } });
+  const g1 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo7 })).text);
+  const g1d = JSON.parse((await call("get_hyperexecute_run", { runId: g1.runId, waitSeconds: 30 })).text);
+  check("learning: the same failure later shows the fix that worked", g1d.fixedBefore?.change?.added?.some((l) => /tunnel: true/.test(l)) && g1d.fixedBefore.from === "this machine", JSON.stringify(g1d.fixedBefore || g1d).slice(0, 400));
+
+  // the session as a document: preview, then a Confluence page (stand-in server)
+  let doc = (await call("publish_to_confluence", { repoPath: repo6, preview: true })).text;
+  check("Confluence preview: what was done, runs, learned fix, YAML, no secrets", /## What was done/.test(doc) && /Fixed the YAML/.test(doc) && /## Runs/.test(doc) && /## Learned from this session/.test(doc) && /```yaml/.test(doc) && !/test-key-123/.test(doc) && /Not published/.test(doc) && !created.length, doc.slice(0, 900));
+  const pub = await call("publish_to_confluence", { repoPath: repo6 });
+  const page = created[0];
+  check("Confluence page created in the space, storage format, no secrets", !pub.isError && page?.spaceId === "77" && /HyperExecute setup: he-fixlearn-/.test(page.title) && /ac:name="status"/.test(page.body.value) && /ac:name="code"/.test(page.body.value) && /<h2>Problems and how they were fixed<\/h2>/.test(page.body.value) && !/test-key-123|tester/.test(page.body.value) && /^Basic /.test(page.auth) && /confluence\.test\/wiki\/spaces\/HYP\/pages\/9001/.test(pub.text), (pub.text + JSON.stringify(page || {})).slice(0, 700));
+  const kbHit = JSON.parse((await call("search_knowledge_base", { query: "he-fixlearn tunnel learned" })).text || "[]");
+  check("the published page becomes searchable knowledge", JSON.stringify(kbHit).includes("he-fixlearn"), JSON.stringify(kbHit).slice(0, 300));
+  conf.close();
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");

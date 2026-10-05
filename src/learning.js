@@ -3,18 +3,22 @@
 //                           it becomes the starting point for that framework (explicit options still win).
 //   accuracy-cases/<repo>/  every YAML that ran green is saved as an accuracy case (case.json + expected.yaml),
 //                           so `npm run accuracy` checks future versions against setups that really worked.
+//   learned-fixes.json      a failure, and the YAML change after which the next run passed. The same failure
+//                           later gets that change suggested first (also shared through team memory).
 // HE_LEARN=off turns both off. Nothing here leaves the machine.
 //
 // Team memory, in the tested repo (.hyperexecute/team.json), shared through git and reviewed like code:
 //   options        settings the team agreed on for this repo (OS, VMs, split, profile, env values…)
 //   notes          things every teammate's agent should know ("staging needs the tunnel")
 //   passingSetups  the last setups that ran green
+//   fixesThatWorked  failures the team fixed, with the YAML change that made the next run pass
 // Precedence when generating: explicit options > team options > this user's usual settings.
 // HE_TEAM_MEMORY=off turns it off. Credentials are never written to it.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { mask, maskKeepRefs, signature } from "./feedback.js";
 
 const dir = () => process.env.HE_STATE_DIR || path.join(os.homedir(), ".hyperexecute-studio");
 const enabled = () => !/^(off|0|false|no)$/i.test(process.env.HE_LEARN || "");
@@ -56,7 +60,8 @@ export function readTeamMemory(repo) {
   if (!teamEnabled() || !repo) return null;
   try {
     const t = JSON.parse(fs.readFileSync(path.join(repo, TEAM_FILE), "utf8"));
-    return { options: cleanTeamOptions(t.options), notes: Array.isArray(t.notes) ? t.notes.filter((n) => typeof n === "string") : [], passingSetups: Array.isArray(t.passingSetups) ? t.passingSetups : [] };
+    const list = (x) => (Array.isArray(x) ? x : []);
+    return { options: cleanTeamOptions(t.options), notes: list(t.notes).filter((n) => typeof n === "string"), passingSetups: list(t.passingSetups), fixesThatWorked: list(t.fixesThatWorked) };
   } catch {
     return null;
   }
@@ -70,6 +75,7 @@ function writeTeamMemory(repo, t) {
     options: t.options,
     notes: t.notes,
     passingSetups: t.passingSetups,
+    fixesThatWorked: t.fixesThatWorked?.length ? t.fixesThatWorked : undefined,
   };
   fs.writeFileSync(file, JSON.stringify(body, null, 2) + "\n");
   return file;
@@ -78,7 +84,7 @@ function writeTeamMemory(repo, t) {
 // Explicit "remember this for the team": set/unset options, add/remove notes.
 export function rememberForTeam(repo, { options, unset, note, removeNote } = {}) {
   if (!teamEnabled()) throw new Error("Team memory is off (HE_TEAM_MEMORY=off).");
-  const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [] };
+  const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [], fixesThatWorked: [] };
   const rejected = Object.keys(options || {}).filter((k) => !(k in cleanTeamOptions({ [k]: options[k] })));
   Object.assign(t.options, cleanTeamOptions(options));
   if (options?.extraEnv) {
@@ -95,13 +101,72 @@ export function rememberForTeam(repo, { options, unset, note, removeNote } = {})
 export function recordTeamPass(repo, { options, configFile, jobId, framework } = {}) {
   if (!enabled() || !teamEnabled() || !repo) return null;
   try {
-    const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [] };
+    const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [], fixesThatWorked: [] };
     for (const [k, v] of Object.entries(cleanTeamOptions(options))) if (LEARNABLE.includes(k)) t.options[k] = v;
     t.passingSetups = [{ config: configFile, framework, jobId: jobId || undefined, at: new Date().toISOString() }, ...t.passingSetups].slice(0, 10);
     return writeTeamMemory(repo, t);
   } catch {
     return null;
   }
+}
+
+// ---------- fixes that worked ----------
+
+// What changed in the YAML, line by line, without secrets.
+export function yamlChange(before = "", after = "") {
+  const clean = (l) => maskKeepRefs(l.replace(/^(\s*(LT_USERNAME|LT_ACCESS_KEY):\s*)(?!\$\{\{).+$/, "$1<masked>"));
+  const a = String(before).split("\n"), b = String(after).split("\n");
+  const inA = new Set(a), inB = new Set(b);
+  return {
+    removed: a.filter((l) => l.trim() && !inB.has(l)).slice(0, 30).map(clean),
+    added: b.filter((l) => l.trim() && !inA.has(l)).slice(0, 30).map(clean),
+  };
+}
+
+// The same failure: same headline (normalized), or the same set of rules matched.
+const failureKey = (f) => ({ sig: f?.headline ? signature(f.headline) : null, rules: [...new Set(f?.ruleIds || [])].sort().join(",") });
+const sameFailure = (k, e) => (k.sig && e.sig === k.sig) || (k.rules && e.rules === k.rules);
+const fixesFile = () => path.join(dir(), "learned-fixes.json");
+const readFixes = () => { try { return JSON.parse(fs.readFileSync(fixesFile(), "utf8")); } catch { return []; } };
+
+// A run passed after a fix: remember the failure and the change (here and in the repo's team memory).
+export function recordFixThatWorked({ repo, failure, before, after, how, applied, profile, jobId }) {
+  if (!enabled() || !failure) return null;
+  const k = failureKey(failure);
+  if (!k.sig && !k.rules) return null;
+  const change = yamlChange(before, after);
+  if (!change.added.length && !change.removed.length) return null;
+  const entry = { ...k, headline: mask(failure.headline || "").slice(0, 300), title: failure.title, how, applied: applied?.slice(0, 10), change, framework: profile?.primaryFramework, language: profile?.language, jobId: jobId || undefined };
+  try {
+    const all = readFixes();
+    const old = all.find((e) => sameFailure(k, e));
+    const now = new Date().toISOString();
+    if (old) Object.assign(old, entry, { worked: (old.worked || 1) + 1, lastAt: now });
+    else all.unshift({ ...entry, worked: 1, firstAt: now, lastAt: now });
+    fs.mkdirSync(dir(), { recursive: true });
+    fs.writeFileSync(fixesFile(), JSON.stringify(all.slice(0, 200), null, 2));
+  } catch {}
+  if (teamEnabled() && repo) {
+    try {
+      const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [], fixesThatWorked: [] };
+      const rest = t.fixesThatWorked.filter((e) => !sameFailure(k, e));
+      const prev = t.fixesThatWorked.find((e) => sameFailure(k, e));
+      t.fixesThatWorked = [{ ...entry, worked: (prev?.worked || 0) + 1, at: new Date().toISOString() }, ...rest].slice(0, 20);
+      writeTeamMemory(repo, t);
+    } catch {}
+  }
+  return entry;
+}
+
+// Has this failure been fixed before? The team's record first (it travels with the repo), then this machine's.
+export function findLearnedFix({ repo, headline, ruleIds }) {
+  if (!enabled()) return null;
+  const k = failureKey({ headline, ruleIds });
+  if (!k.sig && !k.rules) return null;
+  const team = readTeamMemory(repo)?.fixesThatWorked?.find((e) => sameFailure(k, e));
+  if (team) return { ...team, from: "team" };
+  const mine = readFixes().find((e) => sameFailure(k, e));
+  return mine ? { ...mine, from: "this machine" } : null;
 }
 
 // ---------- this user's usual settings ----------

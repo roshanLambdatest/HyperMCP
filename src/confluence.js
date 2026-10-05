@@ -8,6 +8,8 @@
 //   ATLASSIAN_EMAIL       (alias: JIRA_EMAIL, CONFLUENCE_EMAIL)
 //   ATLASSIAN_API_TOKEN   (alias: JIRA_API_TOKEN, CONFLUENCE_API_TOKEN)
 //   ATLASSIAN_AUTH        "basic" (default) | "bearer"
+//   CONFLUENCE_PUBLISH_SPACE  space for "Add to Confluence" pages (default HYP)
+//   CONFLUENCE_PARENT_ID      page to create them under (optional)
 
 const env = (...names) => names.map((n) => process.env[n]).find((v) => v && v.trim())?.trim();
 
@@ -25,21 +27,23 @@ function authHeader(cfg) {
   return `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString("base64")}`;
 }
 
-async function call(cfg, pathAndQuery) {
+async function call(cfg, pathAndQuery, { method = "GET", body } = {}) {
   if (!cfg.configured) {
     throw new Error(
       "Confluence is not configured. Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN (your Atlassian/Jira API token from https://id.atlassian.com/manage-profile/security/api-tokens) in the MCP server env."
     );
   }
   const res = await fetch(`${cfg.baseUrl}${pathAndQuery}`, {
-    headers: { Authorization: authHeader(cfg), Accept: "application/json" },
+    method,
+    headers: { Authorization: authHeader(cfg), Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(20000),
   });
   if (!res.ok) {
     const body = (await res.text()).slice(0, 300);
     const hint =
       res.status === 401 ? " (check ATLASSIAN_EMAIL matches the account that owns the token, and that the token is not expired)" :
-      res.status === 403 ? " (the account has no access to this space)" :
+      res.status === 403 ? " (the account has no access to this space, or may not create pages in it)" :
       res.status === 404 ? " (wrong CONFLUENCE_BASE_URL or page id — Cloud URLs end in /wiki)" : "";
     throw new Error(`Confluence API ${res.status}${hint}: ${body}`);
   }
@@ -60,6 +64,25 @@ export async function whoAmI() {
     throw new Error("Confluence rejected the credentials and treated the request as anonymous. Check ATLASSIAN_EMAIL is the Atlassian account email that created ATLASSIAN_API_TOKEN, and that the token is valid.");
   }
   return identity;
+}
+
+// Create a page (Confluence storage format). Cloud uses the v2 API; Data Center (bearer) the v1 content API.
+export async function createConfluencePage({ title, storage, space, parentId }) {
+  const cfg = confluenceConfig();
+  await whoAmI();
+  const key = space || env("CONFLUENCE_PUBLISH_SPACE") || "HYP";
+  const parent = parentId || env("CONFLUENCE_PARENT_ID") || undefined;
+  let page;
+  if (cfg.mode === "bearer") {
+    page = await call(cfg, "/rest/api/content", { method: "POST", body: { type: "page", title, space: { key }, ancestors: parent ? [{ id: String(parent) }] : undefined, body: { storage: { value: storage, representation: "storage" } } } });
+  } else {
+    const sp = await call(cfg, `/api/v2/spaces?keys=${encodeURIComponent(key)}`);
+    const spaceId = sp.results?.[0]?.id;
+    if (!spaceId) throw new Error(`Confluence space ${key} not found, or this account can't see it.`);
+    page = await call(cfg, "/api/v2/pages", { method: "POST", body: { spaceId, status: "current", title, parentId: parent ? String(parent) : undefined, body: { representation: "storage", value: storage } } });
+  }
+  const webui = page._links?.webui || "";
+  return { id: page.id, title: page.title || title, space: key, url: webui ? `${page._links?.base || cfg.baseUrl}${webui}` : `${cfg.baseUrl}/pages/viewpage.action?pageId=${page.id}` };
 }
 
 const cqlEscape = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
