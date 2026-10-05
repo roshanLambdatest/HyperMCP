@@ -22,7 +22,8 @@ import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimiz
 import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir, headline } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
-import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
+import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, applyTeamFixes, promotionCandidates, promoteTeamFix, markStoppedTeamFixes, personalFixSuggestions, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
+import { startUpdateCheck, updateInfo, takeUpdateNote } from "./updates.js";
 import { buildSetupReport } from "./report.js";
 import { syncGists, gistsStatus, gistSources } from "./gists.js";
 import { searchDocs, docsStatus, localIsWeak } from "./docs.js";
@@ -54,7 +55,11 @@ Rules that matter:
 
 const server = new McpServer({ name: "hyperexecute", version: "1.9.3" }, { instructions: INSTRUCTIONS });
 
-const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
+// the first reply after a newer release is known carries a one-line note (a separate block, so JSON replies stay JSON)
+const text = (obj) => {
+  const note = takeUpdateNote();
+  return { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }, ...(note ? [{ type: "text", text: note }] : [])] };
+};
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
 
 // Default repo = HE_DEFAULT_REPO or the first workspace root the client opened the server in.
@@ -122,6 +127,7 @@ server.registerTool(
       discoveryMode: z.enum(["local", "remote"]).optional(),
       runnerClass: z.string().optional().describe("Cucumber (Java) runner class to use"),
       embedCredentials: z.boolean().optional().describe("Default true: put the saved LambdaTest account into LT_USERNAME / LT_ACCESS_KEY. false keeps ${{ .secrets.* }} references (safe to commit)"),
+      extraSysProps: z.record(z.string(), z.string()).optional().describe("Values for JVM system properties the tests read (analyze_repo sysProps), passed as -Dname=value"),
       mavenProfile: z.string().optional().describe("Maven profile id to pass as -P<id> to every mvn command (see analyze_repo mavenProfiles)"),
       tunnel: z.boolean().optional().describe("Enable LambdaTest tunnel for internal URLs"),
       jobLabel: z.array(z.string()).optional(),
@@ -153,6 +159,12 @@ server.registerTool(
           result = generateYaml(profile, opts);
         }
       }
+      // proven team fixes for this framework, after the normal rules (never this machine's own fixes)
+      const baseErrors = validateYaml(result.yaml, repo).errors;
+      const teamFixes = args.useLearned === false ? { applied: [], skipped: [] } : applyTeamFixes(result.yaml, profile, repo, explicit, (y) => validateYaml(y, repo).errors.every((e) => baseErrors.includes(e)));
+      if (teamFixes.applied.length) result.yaml = teamFixes.yaml;
+      const promote = args.useLearned === false ? [] : promotionCandidates(repo, profile);
+      const suggestedFixes = args.useLearned === false ? [] : personalFixSuggestions(profile);
       if (args.write) recordChoice(profile, explicit);
       const validation = validateYaml(result.yaml, repo);
       let written;
@@ -176,6 +188,10 @@ server.registerTool(
           result.notes.length ? `\nNotes:\n- ${result.notes.join("\n- ")}` : "",
           result.warnings.length ? `\nWarnings:\n- ${result.warnings.join("\n- ")}` : "",
           Object.keys(team).length ? `\nUsing the team's settings for this repo (${TEAM_FILE}): ${Object.entries(team).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")}. Pass the option explicitly to override, or remember_for_team to change it for everyone.` : "",
+          teamFixes.applied.length ? `\nTeam fixes applied (${TEAM_FILE}):\n- ${teamFixes.applied.join("\n- ")}` : "",
+          teamFixes.skipped.length ? `\nTeam fixes not applied:\n- ${teamFixes.skipped.join("\n- ")}` : "",
+          promote.length ? `\nA team fix worked more than once (promoteFix suggestion; ask the user before promoting):\n${promote.map((c) => `- ${c.change} (worked ${c.worked}×, for: ${c.failure}) → ${c.how}`).join("\n")}` : "",
+          suggestedFixes.length ? `\nsuggestedFixes (fixes that worked on this machine for ${result.framework}; not applied, use one only if the same failure appears):\n${suggestedFixes.map((f) => `- ${f.failure}: +${f.change.added.join(" / ")}`).join("\n")}` : "",
           Object.keys(learned).length ? `\nUsing this user's usual settings for ${result.framework}: ${Object.entries(learned).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")} (learned from earlier choices; pass the option explicitly, or useLearned:false, to override).` : "",
           profile.confidence?.level !== "high" ? `\nConfidence: ${profile.confidence.level} (${profile.confidence.reasons.join("; ")})` : "",
           profile.assumptions?.length ? `\nAssumptions:\n- ${profile.assumptions.join("\n- ")}` : "",
@@ -382,7 +398,7 @@ server.registerTool(
         confluence.connection = e.message;
       }
     }
-    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), gists: { sources: gistSources() || "off", ...gistsStatus() }, testmuDocs: docsStatus(), confluence });
+    return text({ update: updateInfo(), localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), gists: { sources: gistSources() || "off", ...gistsStatus() }, testmuDocs: docsStatus(), confluence });
   }
 );
 
@@ -571,11 +587,14 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     if (!["passed", "passed-with-failures"].includes(rec.status)) {
       rec.failure = { headline: headline(evidence.text), ruleIds, title: rec.diagnosis.diagnoses[0]?.title };
       rec.learnedFix = findLearnedFix({ repo, ...rec.failure });
+      // a promoted team fix that this failure points at stops being applied
+      rec.stoppedTeamFixes = markStoppedTeamFixes(repo, [rec.diagnosis.failedStage?.command, rec.failure.headline, ...rec.diagnosis.diagnoses.map((x) => x.evidence)].filter(Boolean).join("\n"));
     }
     // this run passed after a YAML fix: remember the failure and the change that fixed it
     const prev = parent && runs.get(parent);
     if (!r.stopped && ["passed", "passed-with-failures"].includes(rec.status) && prev?.fixedWith && prev.failure) {
       rec.learned = recordFixThatWorked({ repo, failure: prev.failure, ...prev.fixedWith, profile, jobId: rec.diagnosis.jobId });
+      if (rec.learned) rec.promote = promotionCandidates(repo, profile);
     }
     logStep(repo, `Run ${attempt}${rec.targeted ? " (affected tests only)" : ""} finished`, `${rec.status}${rec.diagnosis.diagnoses.length ? ` · ${rec.diagnosis.diagnoses.map((x) => x.title).join("; ")}` : ""}${rec.learned ? " · fix remembered" : ""}`);
     if (!r.stopped && rec.status === "passed" && !rec.targeted) {
@@ -619,6 +638,8 @@ function runView(rec, tailChars = 3000) {
     savedAsAccuracyCase: rec.savedCase ? "This passing setup was saved as an accuracy case, so future versions are checked against it." : undefined,
     fixedBefore: rec.learnedFix ? { how: rec.learnedFix.how === "rules" ? "a built-in rule's fix" : "a YAML change", worked: rec.learnedFix.worked, from: rec.learnedFix.from, change: rec.learnedFix.change, note: "This failure was fixed before by this change and the next run passed. Try the same change first (fix_and_rerun_hyperexecute with yamlContent), after checking it fits this YAML." } : undefined,
     learned: rec.learned ? "The fix applied before this run made it pass: it's remembered (here and in the repo's team memory) for the next time this failure appears." : undefined,
+    promoteFix: rec.promote?.length ? { suggestions: rec.promote, note: "These team fixes worked more than once. Ask the user; on yes, remember_for_team with promoteFix applies the fix to every new YAML for the same framework and language." } : undefined,
+    teamFixStopped: rec.stoppedTeamFixes?.length ? `This failure points at what a promoted team fix added, so it is no longer applied: ${rec.stoppedTeamFixes.join("; ")}. remember_for_team with promoteFix re-enables it.` : undefined,
     teamMemory: rec.teamFile ? `Team memory updated (${TEAM_FILE}): commit it so teammates' agents start from this passing setup.` : undefined,
     savedForReview: rec.feedbackFile ? "The unexplained part of this failure was saved (masked) for rule review — see review_diagnosis_feedback." : undefined,
     logFiles: rec.evidence?.files,
@@ -868,14 +889,17 @@ server.registerTool(
       unset: z.array(z.string()).optional().describe("Option names to stop pinning"),
       note: z.string().optional().describe("A short fact every teammate's agent should know about this repo"),
       removeNote: z.string().optional().describe("Remove the note that matches this text"),
+      promoteFix: z.string().optional().describe("Promote (or re-enable) a team fix from a promoteFix suggestion: new YAMLs for the same framework and language get it"),
     },
   },
-  async ({ repoPath, options, unset, note, removeNote }) => {
+  async ({ repoPath, options, unset, note, removeNote, promoteFix }) => {
     try {
       const repo = resolveRepo(repoPath);
+      const promoted = promoteFix ? promoteTeamFix(repo, promoteFix) : undefined;
+      if (promoted && !options && !unset && !note && !removeNote) return text({ file: path.join(repo, TEAM_FILE), promoted, next: `Commit ${TEAM_FILE} so the team gets it.` });
       const r = rememberForTeam(repo, { options, unset, note, removeNote });
       logStep(repo, "Saved a team decision", [note, options && Object.keys(options).join(", ")].filter(Boolean).join(" · "));
-      return text({ file: r.file, options: r.memory.options, notes: r.memory.notes, rejected: r.rejected.length ? r.rejected : undefined, next: `Commit ${TEAM_FILE} so the team gets it.` });
+      return text({ file: r.file, promoted, options: r.memory.options, notes: r.memory.notes, rejected: r.rejected.length ? r.rejected : undefined, next: `Commit ${TEAM_FILE} so the team gets it.` });
     } catch (e) {
       return fail(e);
     }
@@ -1008,6 +1032,7 @@ Steps:
 );
 
 await server.connect(new StdioServerTransport());
+startUpdateCheck();
 
 // Keep the shared gist knowledge fresh: refresh in the background when the last sync is older than 6 hours.
 if (gistSources()) syncGists().catch((e) => console.error(`gist sync: ${e.message}`));

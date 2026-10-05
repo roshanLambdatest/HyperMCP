@@ -1,6 +1,6 @@
 [
   {
-    "name": "maven-testng default → v0.2 class",
+    "name": "maven-testng v0.2 → class discovery",
     "repo": "maven-testng",
     "expected": {
       "language": "java",
@@ -13,6 +13,9 @@
         "BASE_URL"
       ],
       "confidence": "high"
+    },
+    "options": {
+      "yamlVersion": "0.2"
     }
   },
   {
@@ -29,7 +32,7 @@
         "-Dtest=\"$test\""
       ],
       "preContains": [
-        "-Dmaven.test.skip=true"
+        "-DskipTests clean test-compile"
       ]
     }
   },
@@ -96,6 +99,9 @@
       "language": "java",
       "framework": "junit5",
       "v02Name": "gradle/junit5",
+      "yamlVersion": "0.2"
+    },
+    "options": {
       "yamlVersion": "0.2"
     }
   },
@@ -232,6 +238,9 @@
     "repo": "spock-groovy",
     "expected": {
       "v02Name": "gradle/spock"
+    },
+    "options": {
+      "yamlVersion": "0.2"
     }
   },
   {
@@ -268,6 +277,31 @@
     },
     "expected": {
       "discovered": 2
+    }
+  },
+  {
+    "name": "gradle-kts JUnit 5: v0.1 by default (v0.2 discovery found 0 tests in real jobs)",
+    "repo": "gradle-kts",
+    "expected": {
+      "framework": "junit5",
+      "yamlVersion": "0.1"
+    }
+  },
+  {
+    "name": "spock: v0.1 by default",
+    "repo": "spock-groovy",
+    "expected": {
+      "framework": "spock",
+      "yamlVersion": "0.1"
+    }
+  },
+  {
+    "name": "maven-testng default → v0.1 (real jobs)",
+    "repo": "maven-testng",
+    "expected": {
+      "framework": "testng",
+      "yamlVersion": "0.1",
+      "runson": "linux"
     }
   }
 ]

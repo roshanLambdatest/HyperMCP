@@ -161,13 +161,52 @@ const RULES = [
   // --- big repos ---
   ({ js, profile }) => {
     if (js.differentialUpload || !profile || profile.fileCount < 3000) return null;
-    return { id: "differential-upload", severity: "low", category: "speed", title: `Large repo (${profile.fileCount} files) uploaded in full each run`, why: "differentialUpload only uploads files that changed since the last run.", apply: (d) => d.set("differentialUpload", { enabled: true, ttlHours: 60 }) };
+    return { id: "differential-upload", severity: "low", category: "speed", title: `Large repo (${profile.fileCount} files) uploaded in full each run`, why: "differentialUpload only uploads files that changed since the last run (field setups keep the cache 100 hours).", apply: (d) => d.set("differentialUpload", { enabled: true, ttlHours: 100 }) };
   },
   // --- mac without a reason ---
   ({ js, profile }) => {
     if (!/^mac/.test(js.runson || "") || !profile) return null;
     if (/safari|webkit|xcuitest|ios/i.test(JSON.stringify(profile.drivers) + JSON.stringify(profile.dependencies))) return null;
     return { id: "linux-over-mac", severity: "low", category: "cost", title: "Runs on macOS without needing Safari/iOS", why: "Linux VMs start faster. Keep mac only if the customer needs Safari/WebKit or macOS specifically.", apply: (d) => d.set("runson", "linux") };
+  },
+  // ---- learned from field YAMLs (LambdaTest samples + the team's gist pool) and the YAML reference ----
+  // an app server started in pre blocks it (or dies with it); background runs it next to the tests
+  ({ doc, js }) => {
+    const pre = strList(doc.get("pre"));
+    const i = pre.findIndex((c) => /(\bnpm (run )?(start|serve|dev)\b|\byarn (start|serve|dev)\b|\bnx serve\b|\bhttp-server\b|\bstatic-server\b|\bserve\s+-|python3? -m http\.server|java -jar \S+\.jar|docker compose up|docker-compose up)/.test(c) && !/\bwait-on\b|start-server-and-test/.test(c));
+    if (i < 0 || js.background) return null;
+    return { id: "background-server", severity: "high", category: "reliability", title: "A server is started in `pre`", why: `\`${pre[i]}\` keeps running, so pre never finishes (or the server stops when pre ends). \`background:\` starts it alongside pre and keeps it up until post, on every VM.`, apply: (d) => {
+      d.set("background", [pre[i].replace(/\s*&\s*$/, "")]);
+      d.deleteIn(["pre", i]);
+    } };
+  },
+  // stop paying for a job whose tests keep failing the same way
+  ({ js, units }) => {
+    if (js.failFast || !units || units < 20) return null;
+    return { id: "fail-fast", severity: "medium", category: "cost", title: `No failFast on a ${units}-unit job`, why: "When a shared problem (app down, bad build) fails test after test, failFast aborts the job after N consecutive failures instead of running every unit. Retries count once.", apply: (d) => d.set("failFast", { maxNumberOfTests: Math.max(5, Math.round(units / 10)) }) };
+  },
+  // tasks that end up with no tests (a filtered or targeted run) shouldn't fail on missing reports
+  ({ js }) => {
+    if (!js.uploadArtefacts || js.skipArtifactStageIfNoTest !== undefined) return null;
+    if (!/--grep|-t |--tags|-m |--include|grepTags|\$tag/.test(String(js.testRunnerCommand || ""))) return null;
+    return { id: "skip-artifacts-no-test", severity: "low", category: "reliability", title: "Filtered runs can leave tasks without reports", why: "With a tag/grep filter some tasks run no test; their artefact stage then fails the job. skipArtifactStageIfNoTest marks those stages skipped instead.", apply: (d) => d.set("skipArtifactStageIfNoTest", true) };
+  },
+  // Cypress downloads its binary on every VM unless the cache folder is cached too
+  ({ js }) => {
+    const cy = /cypress/.test(String(js.testRunnerCommand || "") + JSON.stringify(js.testSuites || ""));
+    if (!cy || js.env?.CYPRESS_CACHE_FOLDER || !js.cacheDirectories) return null;
+    return { id: "cypress-binary-cache", severity: "medium", category: "speed", title: "The Cypress binary is downloaded on every VM", why: "node_modules is cached but the Cypress app (~500 MB) lives in ~/.cache/Cypress. Setting CYPRESS_CACHE_FOLDER inside the repo and caching it skips that download (common in field setups).", apply: (d) => {
+      d.setIn(["env", "CYPRESS_CACHE_FOLDER"], "cypressCache");
+      const dirs = strList(d.get("cacheDirectories"));
+      if (!dirs.includes("cypressCache")) d.set("cacheDirectories", [...dirs, "cypressCache"]);
+    } };
+  },
+  // whole-scenario video for tests HyperExecute runs on the VM itself (no grid session to record)
+  ({ js, profile }) => {
+    if (js.captureScreenRecordingForScenarios !== undefined || !profile) return null;
+    const onVm = ["cypress", "playwright", "testcafe", "codeceptjs", "gauge"].includes(profile.primaryFramework) && !profile.grid?.usesLambdaTestHub;
+    if (!onVm) return null;
+    return { id: "scenario-video", severity: "low", category: "usability", title: "No video of tests that run on the VM", why: "These tests drive a browser on the VM, not a grid session, so there's no session video. captureScreenRecordingForScenarios records each scenario (keep the framework's own video capability off: both together fail).", apply: (d) => d.set("captureScreenRecordingForScenarios", true) };
   },
   ({ js }) => {
     if (js.jobLabel) return null;

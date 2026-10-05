@@ -1,0 +1,50 @@
+---
+# HyperExecute YAML generated for: serenity-bdd_serenity-cucumber-starter
+# Framework: cucumber | Language: java | Build: maven
+# YAML 0.1 | Mode: autosplit | Split by: feature
+# Run: ./hyperexecute --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config hyperexecute.yaml
+
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 2
+scenarioCommandStatusOnly: true
+runtime:
+  language: java
+  version: "17"
+env:
+  CACHE_DIR: m2_cache_dir
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "pom.xml" }}'
+cacheDirectories:
+  - $CACHE_DIR
+pre:
+  - mvn -Dmaven.repo.local=$CACHE_DIR -DskipTests clean test-compile
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: find src/test/resources/features/search -type f -name '*.feature' | sed 's#^\./##'
+testRunnerCommand: mvn test -Dmaven.repo.local=$CACHE_DIR -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false -Dtest=CucumberTestSuite -Dcucumber.options="$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - target/cucumber-reports/**
+      - target/surefire-reports/**
+report: true
+partialReports:
+  location: target/cucumber-reports/
+  type: json
+  frameworkName: cucumber
+jobLabel:
+  - cucumber
+  - linux
+  - autosplit

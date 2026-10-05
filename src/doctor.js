@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { toSelector, testLabel, collectTestResults, parseResultFile } from "./results.js";
+import { cleanLine, isNoise } from "./feedback.js";
 
 function dedupeTests(tests) {
   const m = new Map();
@@ -113,9 +114,29 @@ export function collectEvidence({ output = "", repoPath, since, artifactsDir }) 
     tests: dedupeTests(tests),
     files: files.map((f) => f.file),
     failedStage: findFailedStage({ output: all, files, job }),
+    scenarios: scenarioCounts(job),
     jobId: (all.match(/jobId[=:"\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i) || all.match(/job[ _-]?id\W+([\w-]{8,})/i) || [])[1] || null,
     jobUrl: (all.match(/https:\/\/[\w.-]*(?:hyperexecute|lambdatest|testmuai)[\w.-]*\/[^\s"')]*job[^\s"')]*/i) || [])[0] || null,
   };
+}
+
+// Totals from the runners' printed summaries, across every downloaded scenario log
+export function runnerSummary(text) {
+  let passed = 0, failed = 0;
+  for (const m of text.matchAll(/^\s*(\d+) passing\b/gm)) passed += +m[1];
+  for (const m of text.matchAll(/^\s*(\d+) failing\b/gm)) failed += +m[1];
+  for (const m of text.matchAll(/^Tests:\s+(?:(\d+) failed, )?(?:\d+ skipped, )?(?:(\d+) passed, )?(\d+) total/gm)) { failed += +(m[1] || 0); passed += +(m[2] || 0); }
+  for (const m of text.matchAll(/^(\d+) tests?, (\d+) passed, (\d+) failed/gm)) { passed += +m[2]; failed += +m[3]; }
+  for (const m of text.matchAll(/│\s*Passing:\s+(\d+)\s*│[\s\S]{0,200}?│\s*Failing:\s+(\d+)/g)) { passed += +m[1]; failed += +m[2]; }
+  return { passed, failed, total: passed + failed };
+}
+
+// How the job's test scenarios ended, from the CLI's job summary: { completed, failed, skipped, … }
+function scenarioCounts(job) {
+  if (!job) return null;
+  const c = {};
+  for (const t of job.tasks || []) for (const s of t.stages || []) if (/scenario/i.test(s.type || "")) c[s.status || "unknown"] = (c[s.status || "unknown"] || 0) + 1;
+  return Object.keys(c).length ? c : null;
 }
 
 // ---------- rules ----------
@@ -299,8 +320,34 @@ const RULES = [
     },
   },
   {
+    id: "crlf-script", category: "setup",
+    re: /(\/usr\/bin\/env: .?(sh|bash|python3?)\\r.?: No such file or directory|bad interpreter: [^\n]*\^M|\$'\\r': command not found)/,
+    title: "A script has Windows line endings",
+    why: "A wrapper or shell script was committed with CRLF line endings, so Linux/macOS can't start it.",
+    fix: (ctx) => {
+      const pre = preCommands(ctx.js);
+      const script = ["gradlew", "mvnw"].find((w) => JSON.stringify(ctx.js).includes(`./${w}`));
+      if (!script || pre.some((c) => typeof c === "string" && c.includes("\\r$"))) return null;
+      return { patch: (d) => d.set("pre", [`sed -i.bak 's/\\r$//' ${script}`, ...pre]), summary: `Stripped Windows line endings from ${script} in pre` };
+    },
+  },
+  {
+    id: "node-module-missing", category: "dependencies",
+    re: /Cannot find module '([^'./][^']*)'/,
+    title: "A Node module the tests load isn't installed",
+    why: "A config, plugin or test requires a package that package.json doesn't list, so npm install never brings it onto the VM.",
+    fix: (ctx) => {
+      const raw = (ctx.text.match(/Cannot find module '([^'./][^']*)'/) || [])[1];
+      if (!raw) return null;
+      const mod = raw.startsWith("@") ? raw.split("/").slice(0, 2).join("/") : raw.split("/")[0];
+      const pre = preCommands(ctx.js);
+      if (pre.some((c) => typeof c === "string" && c.includes(mod))) return null;
+      return { patch: (d) => d.set("pre", [...pre, `npm install --no-save ${mod}`]), summary: `Added npm install --no-save ${mod} to pre` };
+    },
+  },
+  {
     id: "playwright-browsers", category: "environment",
-    re: /(Executable doesn't exist at .*ms-playwright|browserType\.launch: Executable doesn't exist|Please run the following command to download new browsers|playwright install)/i,
+    re: /(Executable doesn't exist at .*ms-playwright|browserType\.launch: Executable doesn't exist|Please run the following command to download new browsers)/i, // not the bare words: our own pre runs "playwright install"
     title: "Playwright browsers aren't installed",
     why: "The Playwright package is there but its browsers were never downloaded on the VM.",
     fix: (ctx) => {
@@ -319,7 +366,7 @@ const RULES = [
   },
   {
     id: "grid-auth", category: "credentials",
-    re: /(hub\.lambdatest\.com|cdp\.lambdatest\.com)[^\n]*(401|Unauthorized)|Unauthorized[^\n]*lambdatest|(username|access ?key)[^\n]*(null|undefined|empty)|Invalid username or access ?key/i,
+    re: /(hub\.lambdatest\.com|cdp\.lambdatest\.com)[^\n]*(401|Unauthorized)|Unauthorized[^\n]*lambdatest|\b(LT_USERNAME|LT_ACCESS_KEY|user ?name|access ?key)\b\s*(is|was|=|:)\s*['"]?(null|undefined|empty)['"]?\s*($|[,;.)])|Invalid username or access ?key/im,
     title: "Tests can't log in to the LambdaTest grid",
     why: "LT_USERNAME / LT_ACCESS_KEY aren't reaching the tests on the VM.",
     fix: (ctx) => {
@@ -416,7 +463,9 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
   if (pre && !pre.command && pre.step) pre.command = preCommands(js)[pre.step - 1] || null;
   const ranTests = tests.length > 0 || /(?:Pass|Failed) test stage percentage:\s+(?!0+(?:\.0+)?%)[\d.]+%/i.test(evidence.text || "");
   const text = pre?.log || evidence.text || "";
-  const ctx = { text, js, profile, v02: !!v02Name, pre };
+  // switching to v0.2 is only a fix where its native discovery worked in real jobs (.NET); for Java it
+  // found 0 tests in every real run
+  const ctx = { text, js, profile, v02: Boolean(v02Name && /^dotnet\//.test(v02Name)), pre };
   const found = [];
   for (const r of [...(pre ? PRE_RULES : []), ...RULES]) {
     if (!r.re.test(text) || (pre && !ranTests && r.notYaml)) continue;
@@ -445,8 +494,29 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
   const yamlFixes = found.filter((f) => f.fix);
   const failed = classified.length;
   const needsValue = [...new Set(yamlTests.map((c) => c.fix.needsValue).filter(Boolean))];
+  // test runners' own summaries in the logs (Cypress/Mocha "N passing / M failing", Jest "Tests: …",
+  // Robot "N tests, P passed, F failed"), for runs that ran tests but left no report file
+  const sum = runnerSummary(evidence.text || "");
+  // the job summary says how the scenarios ended, even when no per-test report was downloaded
+  const sc = evidence.scenarios || {};
+  const scDone = sc.completed || 0, scFailed = (sc.failed || 0) + (sc.error || 0), scSkipped = sc.skipped || 0;
+  if (!pre && !scDone && !scFailed && scSkipped && !found.some((f) => f.id === "zero-tests")) {
+    found.push({ id: "scenarios-skipped", category: "discovery", title: "Every scenario was skipped: no test ran", why: "The runner command ran but executed no test (wrong selector, a runner class outside the test sources, a suite file that needs a -D property), and HyperExecute marked each scenario skipped.", advice: "Run the runner command locally for one discovered item and check it runs tests; compare with the repo's own test command.", evidence: "", fix: null, stop: false, notYaml: false });
+  }
+  // per-test reports beat stage statuses: every reported test passed = passed
+  const allTestsPassed = tests.length > 0 && tests.every((t) => t.status === "passed" || t.status === "skipped") && tests.some((t) => t.status === "passed");
+  const logVerdict = !pre && !yamlFixes.length && !tests.length && sum.total
+    ? sum.failed ? (sum.passed ? "passed-with-failures" : "test-failures") : "passed"
+    : null;
+  if (logVerdict && sum.failed && !found.some((f) => f.id === "test-failures")) found.push({ id: "test-failures", category: "tests", title: "Tests failed on assertions / element lookups", why: `The run worked: ${sum.passed} passed, ${sum.failed} failed (from the test runner's summary). That's the tests or the application, not the YAML.`, advice: "Open the failing tests in the HyperExecute dashboard; rerunning won't fix them.", evidence: "", fix: null, stop: true, notYaml: true });
+  const scenarioVerdict = logVerdict ? logVerdict : pre || yamlFixes.length || failed ? null
+    // a scenario the grid marked failed counts even when the framework's report passed (tests that catch
+    // errors and set the session status themselves)
+    : scFailed && (scDone || allTestsPassed) ? "passed-with-failures"
+    : allTestsPassed || (scDone && !scSkipped) ? "passed" : null;
   const status =
     found.some((f) => f.id === "cli-auth") ? "auth-error" :
+    scenarioVerdict && !found.some((f) => !f.notYaml) ? scenarioVerdict :
     yamlFixes.length ? "fixable" :
     yamlTests.length && yamlTests.every((c) => c.fix.needsValue) ? "needs-input" :
     yamlTests.length ? "fixable-tests" :
@@ -457,6 +527,7 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
     found.length ? "needs-attention" : "unknown";
   return {
     status,
+    scenarios: evidence.scenarios || undefined,
     jobId: evidence.jobId,
     jobUrl: evidence.jobUrl,
     failedStage: pre ? { stage: "pre", step: pre.step, command: pre.command, remark: pre.remark, logFile: pre.file, log: pre.log ? pre.log.slice(-3000) : null } : null,
@@ -500,8 +571,9 @@ export function logDigest(src, max = 6000) {
   const ev = typeof src === "string" ? { text: src } : src || {};
   const st = ev.failedStage;
   const head = st?.log ? `----- failed ${st.stage} step${st.command ? `: ${st.command}` : ""}${st.file ? ` (${st.file})` : ""} -----\n${st.log.slice(-Math.floor(max * 0.6))}\n` : "";
-  const lines = (ev.text || "").split("\n");
-  const errs = lines.filter((l) => /\b(error|exception|failed|failure|fatal|denied|not found|timed? ?out|refused|ERR::)\b/i.test(l)).slice(-60);
+  // error lines leave out the noise headline() skips (cache misses, download progress, summary JSON); the tail keeps it
+  const lines = (ev.text || "").split("\n").map(cleanLine).filter(Boolean);
+  const errs = lines.filter((l) => !isNoise(l) && /\b(error|exception|failed|failure|fatal|denied|not found|timed? ?out|refused|ERR::)\b/i.test(l)).slice(-60);
   const tail = lines.slice(-60);
   return head + [...new Set([...errs, "----- tail -----", ...tail])].join("\n").slice(-(max - head.length));
 }

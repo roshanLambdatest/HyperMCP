@@ -73,7 +73,8 @@ function analyzeJava(root, allFiles, profile) {
   const inProject = (f) => !profile.projectRoot || f.startsWith(profile.projectRoot + "/");
   files = files.filter(inProject);
   profile.hasMavenWrapper = files.includes("mvnw");
-  profile.hasGradleWrapper = files.includes("gradlew");
+  // ./gradlew needs gradle/wrapper/gradle-wrapper.jar; without it the VM's gradle has to run the build
+  profile.hasGradleWrapper = files.includes("gradlew") && files.some((f) => /(^|\/)gradle\/wrapper\/gradle-wrapper\.jar$/.test(f));
 
   profile.buildFiles = profile.buildFiles.filter(inProject);
   const buildText = profile.buildFiles.map((f) => read(root, f)).join("\n");
@@ -98,11 +99,15 @@ function analyzeJava(root, allFiles, profile) {
     buildText.match(/<maven\.compiler\.(?:release|source)>\s*([\d.]+)/) ||
     buildText.match(/<java\.version>\s*([\d.]+)/) ||
     buildText.match(/<release>\s*([\d.]+)<\/release>/) ||
+    buildText.match(/<artifactId>maven-compiler-plugin<\/artifactId>[\s\S]{0,600}?<(?:source|target)>\s*([\d.]+)\s*</) ||
     buildText.match(/sourceCompatibility\s*=\s*['"]?(?:JavaVersion\.VERSION_)?([\d._]+)/) ||
     buildText.match(/languageVersion(?:\.set\(|\s*=\s*)JavaLanguageVersion\.of\((\d+)\)/) ||
     buildText.match(/jvmToolchain\((\d+)\)/);
   if (jv) profile.runtimeVersion = jv[1].replace("_", ".").replace(/^1\.(\d+)$/, "$1");
 
+  // Playwright for Java: the CDP connection to LambdaTest needs a Node playwright of the same version
+  const pwj = buildText.match(/<groupId>com\.microsoft\.playwright<\/groupId>\s*<artifactId>playwright<\/artifactId>\s*<version>([^<]+)</) || buildText.match(/com\.microsoft\.playwright:playwright:([\d.]+)/);
+  if (pwj) profile.playwrightJavaVersion = pwj[1].startsWith("${") ? (buildText.match(new RegExp(`<${pwj[1].slice(2, -1).replace(/\./g, "\\.")}>([^<]+)<`)) || [])[1] : pwj[1];
   const cukeVer = buildText.match(/<groupId>io\.cucumber<\/groupId>\s*<artifactId>[^<]+<\/artifactId>\s*<version>([^<]+)</);
   if (cukeVer) profile.cucumberVersion = cukeVer[1];
 
@@ -125,6 +130,20 @@ function analyzeJava(root, allFiles, profile) {
   const suiteRefs = [...buildText.matchAll(/<suiteXmlFile>([^<]+)<\/suiteXmlFile>/g)].map((m) => m[1].trim());
   const testngXmls = byExt(files, ".xml").filter((f) => !f.endsWith("pom.xml") && has(read(root, f), /<suite[\s>]/) && has(read(root, f), "testng"));
   profile.testngSuites = uniq([...testngXmls, ...suiteRefs.filter((s) => !s.includes("${"))]);
+  // Properties inside a suite path (xml/testng_${platname}.xml): Maven needs -Dplatname=… or the suite file
+  // "is not a valid file" and nothing runs. Values = the files that exist for each.
+  const defined = (name) => new RegExp(`<${name.replace(/[.]/g, "\\.")}>[^<]+</`).test(buildText.replace(/<suiteXmlFile>[^<]*<\/suiteXmlFile>/g, ""));
+  // surefire's TestNG "testnames" property fed from a -D property: the suite's <test> entries are the units
+  profile.testngTestnamesProp = (buildText.match(/<name>\s*testnames\s*<\/name>\s*<value>\s*\$\{([\w.-]+)\}\s*<\/value>/) || [])[1] || null;
+  profile.surefireProps = [];
+  for (const ref of suiteRefs) {
+    for (const [, name] of ref.matchAll(/\$\{([\w.-]+)\}/g)) {
+      if (ref === `\${${name}}` || defined(name) || profile.surefireProps.some((p) => p.name === name)) continue;
+      const re = new RegExp("^" + ref.replace(/[.*+?^()|[\]\\]/g, "\\$&").replace(/\$\{[\w.-]+\}/g, "([\\w.-]+)").replace(/\$\\\{/g, "") + "$");
+      const values = uniq(files.map((f) => (f.match(re) || [])[1]).filter(Boolean));
+      profile.surefireProps.push({ name, suite: ref, values });
+    }
+  }
 
   // Test classes & methods
   const javaFiles = byExt(files, ".java");
@@ -143,13 +162,22 @@ function analyzeJava(root, allFiles, profile) {
     const tags = uniq([...src.matchAll(/@Tag\(\s*"([^"]+)"\s*\)/g)].map((x) => x[1]));
     testClasses.push({ file: f, className: pkg ? `${pkg}.${cls}` : cls, simpleName: cls, methods, groups, tags });
   }
-  // Spock specifications (Groovy): feature methods are def "name"() in classes extending Specification
-  for (const f of byExt(files, ".groovy")) {
-    const src = read(root, f);
-    if (!/extends\s+(spock\.lang\.)?Specification\b/.test(src)) continue;
+  // Spock specifications (Groovy): feature methods are def "name"() in classes extending Specification,
+  // directly or through the repo's own base classes (Geb: Spec → BasePageGebSpec → GebReportingSpec)
+  const groovy = byExt(files, ".groovy").map((f) => { const src = read(root, f); return { f, src, cls: (src.match(/\bclass\s+(\w+)/) || [])[1], parent: (src.match(/\bclass\s+\w+\s+extends\s+([\w.]+)/) || [])[1]?.split(".").pop() }; });
+  const SPEC_BASE = /^(Specification|GebSpec|GebReportingSpec)$/;
+  const isSpec = (name, seen = new Set()) => {
+    if (!name || seen.has(name)) return false;
+    if (SPEC_BASE.test(name)) return true;
+    seen.add(name);
+    return isSpec(groovy.find((g) => g.cls === name)?.parent, seen);
+  };
+  for (const { f, src, parent } of groovy) {
+    if (!isSpec(parent) || /\babstract\s+class\b/.test(src) || !/^\s*def\s+(["'][^"']+["']|\w+)\s*\(/m.test(src)) continue;
     const pkg = (src.match(/^\s*package\s+([\w.]+)/m) || [])[1];
     const cls = (src.match(/\bclass\s+(\w+)/) || [])[1] || path.basename(f, ".groovy");
-    const methods = [...src.matchAll(/^\s*def\s+["']([^"']+)["']\s*\(/gm)].map((m) => m[1]);
+    // feature methods: def "name"() or def name() (fixture methods setup/cleanup/setupSpec/cleanupSpec aren't tests)
+    const methods = [...src.matchAll(/^\s*def\s+(?:["']([^"']+)["']|(\w+))\s*\(/gm)].map((m) => m[1] || m[2]).filter((n) => !/^(setup|cleanup|setupSpec|cleanupSpec)$/.test(n));
     testClasses.push({ file: f, className: pkg ? `${pkg}.${cls}` : cls, simpleName: cls, methods, groups: [], tags: [] });
   }
   profile.tests.classes = testClasses;
@@ -166,7 +194,7 @@ function analyzeJava(root, allFiles, profile) {
 
   // Frameworks (ordered by specificity)
   if (deps.cucumber || byExt(files, ".feature").length) profile.frameworks.push("cucumber");
-  if (deps.karate) profile.frameworks.push("karate");
+  if (deps.karate) profile.frameworks.unshift("karate"); // Karate features are not Cucumber features
   if (deps.testng) profile.frameworks.push("testng");
   if (deps.junit5) profile.frameworks.push("junit5");
   else if (deps.junit4) profile.frameworks.push("junit4");
@@ -203,8 +231,15 @@ function analyzeRuby(root, files, profile) {
   if (gemfile) profile.buildFiles.push(gemfile);
   profile.lockFile = files.find((f) => /(^|\/)Gemfile\.lock$/.test(f)) || null;
   profile.packageRoot = gemfile && gemfile.includes("/") ? path.posix.dirname(gemfile) : "";
-  const rv = read(root, ".ruby-version").trim() || (gemText.match(/^\s*ruby\s+['"]([\d.]+)/m) || [])[1];
+  const lockText = profile.lockFile ? read(root, profile.lockFile) : "";
+  const rv = read(root, ".ruby-version").trim() || (gemText.match(/^\s*ruby\s+['"]([\d.]+)/m) || [])[1] || (lockText.match(/RUBY VERSION\s+ruby\s+([\d.]+)/) || [])[1];
   if (rv) profile.runtimeVersion = rv.replace(/^ruby-/, "");
+  // the Bundler that wrote the lock file: older Rubygems' bundler can't read newer locks
+  profile.bundlerVersion = (lockText.match(/BUNDLED WITH\s+([\d.]+)/) || [])[1] || null;
+  // Ruby 3 required: a declared 3.x, or a locked selenium-webdriver 4.9+ (those need Ruby >= 3.0)
+  const sw = (lockText.match(/^\s{4}selenium-webdriver \(([\d.]+)\)/m) || [])[1];
+  const [swMajor, swMinor] = (sw || "0.0").split(".").map(Number);
+  profile.needsRuby3 = parseFloat(profile.runtimeVersion || "0") >= 3 || swMajor > 4 || (swMajor === 4 && swMinor >= 9);
   if (gem("cucumber") || hasSteps) profile.frameworks.push("cucumber-ruby");
   if (gem("rspec") || gem("rspec-core") || specFiles.length) profile.frameworks.push("rspec");
   if (gem("selenium-webdriver") || gem("watir") || gem("capybara")) profile.drivers.push("selenium");
@@ -245,9 +280,21 @@ function analyzeNode(root, allFiles, profile) {
   profile.lockFile = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"].map(inInstall).find((f) => allFiles.includes(f)) || null;
   profile.packageManager = /pnpm/.test(profile.lockFile || "") || allFiles.includes("pnpm-workspace.yaml") ? "pnpm" : /yarn/.test(profile.lockFile || "") ? "yarn" : "npm";
   profile.scripts = pkg.scripts || {};
-  if (pkg.engines?.node) profile.runtimeVersion = pkg.engines.node.replace(/[^\d.]/g, "").split(".")[0] || null;
+  // engines.node: ">=12.7.0" is a minimum, not a request for Node 12 (modern tools need a current Node);
+  // "18", "18.x", "^18", "~18.2" pin a major
+  if (pkg.engines?.node) {
+    const e = String(pkg.engines.node).trim();
+    const major = +(e.match(/\d+/) || [])[0];
+    if (/^>/.test(e) || /\|\|/.test(e)) profile.runtimeVersion = major && major > 20 ? String(major) : null; // the generator's default (20) satisfies it
+    else profile.runtimeVersion = major ? String(major) : null;
+  }
   const nvmrc = (read(root, ".nvmrc") || read(root, path.posix.join(profile.packageRoot, ".nvmrc"))).trim();
   if (nvmrc) profile.runtimeVersion = nvmrc.replace(/^v/, "").split(".")[0];
+  // @wdio/sync needs fibers, which doesn't build on Node 16+
+  const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+  if (!profile.runtimeVersion && ("@wdio/sync" in allDeps || "fibers" in allDeps)) profile.runtimeVersion = "14";
+  // Cypress < 10 bundles a webpack that fails on Node 17+ ("digital envelope routines::unsupported")
+  if (!profile.runtimeVersion && allDeps.cypress && parseInt(String(allDeps.cypress).replace(/[^\d.]/g, ""), 10) < 10) profile.runtimeVersion = "16";
 
   // Only files inside the test package count from here on.
   const files = allFiles.filter((f) => !profile.packageRoot || f.startsWith(profile.packageRoot + "/"));
@@ -277,7 +324,14 @@ function analyzeNode(root, allFiles, profile) {
   if (d("nightwatch")) profile.frameworks.push("nightwatch");
   if (d("testcafe")) profile.frameworks.push("testcafe");
   if (d("jest")) profile.frameworks.push("jest");
+  // jest-playwright-preset: the tests are Jest tests that use Playwright as a library
+  if (d("jest-playwright-preset") || d("jest-puppeteer")) profile.frameworks = profile.frameworks.filter((f) => f !== "playwright");
   if (d("mocha")) profile.frameworks.push("mocha");
+  // runners that sit on top of the ones above (CodeceptJS drives Playwright/Puppeteer, Protractor and
+  // Karma bring Jasmine, Testim and Gauge have their own CLIs): they decide how a test is run
+  const usesK6 = files.some((f) => /\.[jt]s$/.test(f) && /from\s+['"]k6(\/[\w/-]+)?['"]/.test(read(root, f)));
+  const gaugeManifest = files.includes(inPkg("manifest.json")) && /"Language"\s*:/.test(read(root, inPkg("manifest.json")));
+  for (const [fwName, on] of [["karma", d("karma")], ["protractor", d("protractor")], ["testim", d("@testim/testim-cli") || d("testim")], ["codeceptjs", d("codeceptjs")], ["gauge", gaugeManifest && files.some((f) => f.endsWith(".spec"))], ["k6", usesK6]]) if (on) profile.frameworks.unshift(fwName);
   if (d("selenium-webdriver")) profile.drivers.push("selenium");
   if (d("playwright") && !d("@playwright/test")) profile.drivers.push("playwright");
   if (d("puppeteer") || d("puppeteer-core")) profile.drivers.push("puppeteer");
@@ -310,19 +364,108 @@ function analyzeNode(root, allFiles, profile) {
     profile.reports.push("playwright-html");
   } else if (fw === "cypress") {
     profile.configFile = files.map(relPkg).find((f) => /^cypress\.config\.[cm]?[jt]s$|^cypress\.json$/.test(f)) || null;
-    tests = files.filter((f) => /\.cy\.[jt]sx?$/.test(f) || (relPkg(f).startsWith("cypress/integration/") && /\.[jt]s$/.test(f)));
+    const gherkin = d("@badeball/cypress-cucumber-preprocessor") || d("cypress-cucumber-preprocessor");
+    tests = files.filter((f) => /\.cy\.[jt]sx?$/.test(f) || (relPkg(f).startsWith("cypress/integration/") && /\.[jt]s$/.test(f)) || (gherkin && relPkg(f).startsWith("cypress/") && f.endsWith(".feature")));
   } else if (fw === "webdriverio") {
     profile.configFile = scriptCfg(/wdio/) || files.map(relPkg).find((f) => /wdio.*\.conf\.[jt]s$/.test(f)) || null;
-    tests = files.filter((f) => (specRe.test(f) || /\.e2e\.[jt]s$/.test(f) || /specs?\//.test(f) && /\.[jt]s$/.test(f)) && !f.includes("pageobjects"));
+    // with the Cucumber framework, wdio's specs are .feature files (the .js files are step definitions)
+    profile.wdioCucumber = d("@wdio/cucumber-framework") || /framework\s*:\s*['"]cucumber['"]/.test(profile.configFile ? read(root, inPkg(profile.configFile)) : "");
+    tests = profile.wdioCucumber ? files.filter((f) => f.endsWith(".feature")) : files.filter((f) => (specRe.test(f) || /\.e2e\.[jt]s$/.test(f) || /specs?\//.test(f) && /\.[jt]s$/.test(f)) && !f.includes("pageobjects"));
   } else if (fw === "cucumber-js") {
     tests = byExt(files, ".feature");
+  } else if (fw === "codeceptjs") {
+    profile.configFile = files.map(relPkg).find((f) => /^codecept\.conf\.[jt]s$/.test(f)) || null;
+    const glob = (read(root, inPkg(profile.configFile || "codecept.conf.js")).match(/tests\s*:\s*['"`]([^'"`]+)['"`]/) || [])[1] || "./*_test.js";
+    const suffix = (glob.match(/\*([^*/]+)$/) || [])[1] || "_test.js";
+    tests = files.filter((f) => f.endsWith(suffix.replace(/\.js$/, ".js")) || f.endsWith(suffix.replace(/\.js$/, ".ts")));
+  } else if (fw === "protractor") {
+    // the config the package's scripts run (protractor conf/x.conf.js); specs are the files under specs/ or e2e/
+    const script = Object.values(profile.scripts).map((c) => (c.match(/protractor\s+([^\s&|]+\.js)/) || [])[1]).find(Boolean);
+    profile.configFile = script ? script.replace(/^\.\//, "") : files.map(relPkg).find((f) => /conf.*\.js$/.test(f) && /exports\.config/.test(read(root, inPkg(f)))) || null;
+    tests = files.filter((f) => /(^|\/)(specs?|e2e)\/[^/]+\.[jt]s$/.test(relPkg(f)));
+  } else if (fw === "karma") {
+    profile.configFile = files.map(relPkg).find((f) => /^karma\.conf\.[jt]s$/.test(f)) || files.map(relPkg).find((f) => /karma.*\.conf\.[jt]s$/.test(f)) || null;
+    tests = profile.configFile ? [inPkg(profile.configFile)] : []; // Karma runs its whole config at once
+  } else if (fw === "testim") {
+    tests = files.filter((f) => specRe.test(f));
+  } else if (fw === "gauge") {
+    tests = files.filter((f) => /\.spec$/.test(f));
+  } else if (fw === "k6") {
+    tests = files.filter((f) => /\.[jt]s$/.test(f) && /from\s+['"]k6(\/[\w/-]+)?['"]/.test(read(root, f)));
   } else if (fw === "nightwatch") {
     profile.configFile = files.map(relPkg).find((f) => /nightwatch\.(conf|json)/.test(f)) || null;
+    // the environment that points at the LambdaTest grid (otherwise nightwatch starts a local driver)
+    const nwText = profile.configFile ? read(root, inPkg(profile.configFile)) : "";
+    const envs = [...(nwText.match(/test_settings\s*:\s*\{([\s\S]*)/) || ["", ""])[1].matchAll(/^\s{4}['"]?([\w-]+)['"]?\s*:\s*\{/gm)].map((m) => m[1]);
+    if (/lambdatest/i.test(nwText)) profile.nightwatchEnv = ["chrome", "lambdatest", "lt", "remote", "single"].find((e) => envs.includes(e)) || envs.find((e) => e !== "default") || null;
     tests = files.filter((f) => /(^|\/)(tests?|specs?)\//.test(f) && /\.[jt]s$/.test(f));
   } else {
     tests = files.filter((f) => specRe.test(f));
   }
   profile.tests.files = tests;
+  // Modules the test config loads that package.json doesn't list (Cypress configs/plugins often require
+  // lambdatest-cypress-cli, installed separately): npm install won't bring them, so pre has to
+  const BUILTIN = new Set(["fs", "path", "os", "url", "util", "child_process", "crypto", "http", "https", "events", "stream", "assert", "zlib", "net", "tls", "dns", "readline", "process", "buffer", "querystring", "timers", "worker_threads", "module", "perf_hooks", "v8", "vm"]);
+  const cfgFiles = files.filter((f) => /(cypress\.config|cypress\/plugins\/index|cypress\/support\/(e2e|index|commands)|wdio.*\.conf|playwright\.config|nightwatch\.conf|jest\.config|codecept\.conf)\.[cm]?[jt]s$/.test(f));
+  const wanted = new Set();
+  for (const f of cfgFiles) for (const m of read(root, f).matchAll(/(?:require\(\s*|from\s+|import\s+)['"]([^'"./][^'"]*)['"]/g)) {
+    const mod = m[1].startsWith("@") ? m[1].split("/").slice(0, 2).join("/") : m[1].split("/")[0];
+    if (!BUILTIN.has(mod.replace(/^node:/, "")) && !mod.startsWith("node:") && !(mod in all)) wanted.add(mod);
+  }
+  profile.missingNodeDeps = [...wanted];
+  // Nothing a runner can split, but the package has its own scripts (node script.js, smartui exec …):
+  // each script is one unit of work.
+  if (!tests.length) {
+    const skip = /^(pre|post)|^(lint|format|prettier|eslint|build|compile|tsc|clean|start|serve|dev|watch|prepare|install|docs?|release|publish|deploy)(:|$)/i;
+    profile.npmScripts = Object.entries(profile.scripts).filter(([n, c]) => !skip.test(n) && !/no test specified/.test(c) && !/^(npm|yarn|pnpm) run \S+( && (npm|yarn|pnpm) run \S+)+$/.test(c.trim())).map(([n]) => n);
+    if (profile.npmScripts.length) {
+      profile.frameworks.unshift("npm-scripts");
+      profile.tests.files = profile.npmScripts;
+    }
+  }
+}
+
+// Repos that aren't Java/.NET/Python/Ruby/Node test suites: Go modules, k6 scripts without a package.json,
+// and native mobile apps (an app and its test suite, run on HyperExecute's real devices).
+function analyzeOther(root, files, profile) {
+  if (profile.language) return;
+  if (files.includes("go.mod") && files.some((f) => f.endsWith("_test.go"))) {
+    profile.language = "go";
+    profile.buildTool = "go";
+    profile.buildFiles.push("go.mod");
+    profile.runtimeVersion = (read(root, "go.mod").match(/^go\s+([\d.]+)/m) || [])[1] || null;
+    profile.frameworks.push("go-test");
+    // one test package per directory that holds *_test.go files
+    profile.tests.files = uniq(files.filter((f) => f.endsWith("_test.go") && !f.startsWith("vendor/")).map((f) => "./" + path.posix.dirname(f))).sort();
+    profile.tests.functions = files.filter((f) => f.endsWith("_test.go")).flatMap((f) => [...read(root, f).matchAll(/^func\s+(Test\w+)\s*\(/gm)].map((m) => m[1]));
+    return;
+  }
+  const k6 = files.filter((f) => /\.[jt]s$/.test(f) && /from\s+['"]k6(\/[\w/-]+)?['"]/.test(read(root, f)));
+  if (k6.length) {
+    profile.language = "node";
+    profile.frameworks.push("k6");
+    profile.tests.files = k6;
+    return;
+  }
+  // an app plus its instrumentation/UI test suite (Espresso: two .apk files; XCUITest: two .ipa files)
+  const isSuite = (f) => /test|espresso|uitests?|runner/i.test(path.posix.basename(f));
+  const apks = files.filter((f) => f.endsWith(".apk")), ipas = files.filter((f) => f.endsWith(".ipa"));
+  const pair = (list) => (list.length >= 2 && list.some(isSuite) && list.some((f) => !isSuite(f)) ? { app: list.find((f) => !isSuite(f)), testSuite: list.find(isSuite) } : null);
+  const maestroFlows = files.filter((f) => /\.ya?ml$/.test(f) && /^appId\s*:/m.test(read(root, f)) && /^-\s*(launchApp|tapOn|assertVisible|inputText)/m.test(read(root, f)));
+  if (pair(apks) || pair(ipas)) {
+    const android = Boolean(pair(apks));
+    profile.language = android ? "android" : "ios";
+    profile.frameworks.push(android ? "espresso" : "xcui");
+    profile.mobileApp = android ? pair(apks) : pair(ipas);
+    profile.tests.files = [profile.mobileApp.testSuite];
+  } else if (maestroFlows.length || files.some((f) => /maestro/i.test(f) && /\.sh$/.test(f))) {
+    profile.language = "mobile";
+    profile.frameworks.push("maestro");
+    profile.tests.files = maestroFlows;
+  } else if (apks.length || ipas.length) {
+    profile.language = apks.length ? "android" : "ios";
+    profile.warnings.push(`Found ${[...apks, ...ipas].join(", ")} but no matching test suite (.apk/.ipa with "test" in its name). For Appium, the tests' own language decides the YAML; for Espresso/XCUITest add the test-suite build.`);
+  }
 }
 
 function analyzePython(root, files, profile) {
@@ -354,6 +497,11 @@ function analyzePython(root, files, profile) {
   const text = manifests.map((f) => read(root, f)).join("\n").toLowerCase();
   const d = (n) => text.includes(n);
   if (d("robotframework") || byExt(files, ".robot").length) profile.frameworks.push("robot");
+  // a Makefile whose targets run robot with --variable values (one target per browser/OS)
+  if (files.includes("Makefile")) {
+    const mk = read(root, "Makefile");
+    profile.makeTargets = [...mk.matchAll(/^([A-Za-z0-9_.-]+):[^\n]*\n((?:\t[^\n]*\n?)+)/gm)].filter((m) => /\brobot\b/.test(m[2])).map((m) => m[1]);
+  }
   if (d("behave") || (byExt(files, ".feature").length && files.some((f) => f.endsWith("steps.py") || f.includes("/steps/")))) profile.frameworks.push("behave");
   if (d("pytest-bdd")) profile.frameworks.push("pytest-bdd");
   if (d("pytest") || files.some((f) => /(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(f)) || files.includes("conftest.py") || (!profile.frameworks.length && byExt(files, ".py").some((f) => /^\s*(async\s+)?def\s+test\w*\s*\(/m.test(read(root, f))))) profile.frameworks.push("pytest");
@@ -472,6 +620,18 @@ function analyzeGridAndEnv(root, files, profile) {
   const scope = profile.projectRoot || profile.packageRoot || "";
   const srcFiles = files.filter((f) => exts.test(f) && !f.includes("package-lock") && (!scope || f.startsWith(scope + "/")));
   const envVars = new Set();
+  const sysProps = new Set();
+  // per variable: is it read with a default somewhere, and is every read only for logging?
+  const envUse = new Map();
+  // `end` = just past the read (its closing quote/bracket included), so `after` starts where a default would
+  const noteUse = (name, src, start, end) => {
+    const line = src.slice(src.lastIndexOf("\n", start) + 1, (src.indexOf("\n", start) + 1 || src.length + 1) - 1);
+    const u = envUse.get(name) || { withDefault: false, logOnly: true };
+    const after = src.slice(end, src.indexOf("\n", end) < 0 ? src.length : src.indexOf("\n", end));
+    if (/^\s*\]?\s*\)?\s*(\|\||\?\?|\bor\b)/.test(after) || /^\s*,\s*[^)\s]/.test(after) || /getOrDefault\(\s*"\w+"\s*,/.test(line)) u.withDefault = true;
+    if (!/\b(console\.(log|info|debug)|System\.out\.print|print\(|println|logger\.|log\.(info|debug)|puts\b|Console\.Write)/.test(line)) u.logOnly = false;
+    envUse.set(name, u);
+  };
   const hubs = new Set();
   let usesLtOptions = false;
   let usesLocalDriver = false;
@@ -479,18 +639,29 @@ function analyzeGridAndEnv(root, files, profile) {
   for (const f of srcFiles.slice(0, 4000)) {
     const src = read(root, f);
     if (!src) continue;
-    for (const m of src.matchAll(/System\.getenv\(\s*"(\w+)"/g)) envVars.add(m[1]);
-    for (const m of src.matchAll(/process\.env\.(\w+)|process\.env\[['"](\w+)['"]\]/g)) envVars.add(m[1] || m[2]);
-    for (const m of src.matchAll(/os\.(?:environ\.get|getenv)\(\s*['"](\w+)['"]|os\.environ\[['"](\w+)['"]\]/g)) envVars.add(m[1] || m[2]);
-    for (const m of src.matchAll(/Environment\.GetEnvironmentVariable\(\s*"(\w+)"/g)) envVars.add(m[1]);
-    for (const m of src.matchAll(/\bENV(?:\[\s*['"](\w+)['"]\s*\]|\.fetch\(\s*['"](\w+)['"])/g)) envVars.add(m[1] || m[2]);
-    for (const m of src.matchAll(/%ENV\{(\w+)\}|\$\{ENV:(\w+)\}|%\{(\w+)\}/g)) envVars.add(m[1] || m[2] || m[3]);
+    const seen = (name, m) => { envVars.add(name); noteUse(name, src, m.index, m.index + m[0].length); };
+    for (const m of src.matchAll(/System\.getenv\(\s*"(\w+)"/g)) seen(m[1], m);
+    for (const m of src.matchAll(/System\.getenv\(\)\.getOrDefault\(\s*"(\w+)"/g)) seen(m[1], m);
+    // JVM system properties read with no default (System.getProperty("x")): Maven needs -Dx=…
+    if (/\.(java|groovy|kt)$/.test(f)) for (const m of src.matchAll(/System\.getProperty\(\s*"([\w.-]+)"\s*\)/g)) if (!/^(user\.|java\.|os\.|file\.|line\.|path\.)/.test(m[1])) sysProps.add(m[1]);
+    for (const m of src.matchAll(/process\.env\.(\w+)|process\.env\[['"](\w+)['"]\]/g)) seen(m[1] || m[2], m);
+    for (const m of src.matchAll(/os\.(?:environ\.get|getenv)\(\s*['"](\w+)['"]|os\.environ\[['"](\w+)['"]\]/g)) seen(m[1] || m[2], m);
+    for (const m of src.matchAll(/Environment\.GetEnvironmentVariable\(\s*"(\w+)"/g)) seen(m[1], m);
+    for (const m of src.matchAll(/\bENV(?:\[\s*['"](\w+)['"]\s*\]|\.fetch\(\s*['"](\w+)['"])/g)) seen(m[1] || m[2], m);
+    for (const m of src.matchAll(/%ENV\{(\w+)\}|\$\{ENV:(\w+)\}/g)) seen(m[1] || m[2], m);
+    // %{VAR} is Robot Framework's env-var syntax; elsewhere it is ordinary string formatting
+    if (/\.(robot|resource)$/.test(f)) for (const m of src.matchAll(/%\{(\w+)\}/g)) seen(m[1], m);
     for (const m of src.matchAll(/(https?:\/\/[^"'\s]*(?:lambdatest\.com|:4444)[^"'\s]*)/g)) hubs.add(m[1].replace(/\/\/[^@/]+@/, "//<creds>@"));
     if (src.includes("LT:Options") || src.includes("lt:options")) usesLtOptions = true;
     if (/new\s+(Chrome|Firefox|Edge|Safari)Driver\s*\(|webdriver\.(Chrome|Firefox|Edge)\(|\bchromium\.launch\(/.test(src)) usesLocalDriver = true;
     if (/(^|\/)(config|env|environments?)\.(properties|json|ya?ml)$|\.env$|config\.properties$/.test(f)) configFiles.push(f);
   }
-  profile.envVars = [...envVars].filter((v) => !["HOME", "PATH", "USER", "CI", "NODE_ENV", "PWD", "TEMP", "TMP"].includes(v)).sort();
+  // set by the OS, the shell or the CI system, never by the YAML
+  const ambient = (v) => ["HOME", "PATH", "USER", "CI", "NODE_ENV", "PWD", "TEMP", "TMP", "TMPDIR", "SHELL", "LANG", "TERM", "JAVA_HOME", "LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOMEPATH", "HOMEDRIVE", "SystemRoot", "windir", "COMPUTERNAME", "OS", "PROCESSOR_ARCHITECTURE", "CIRCLECI", "CIRCLE_CI", "BUILD_NUMBER", "BUILD_ID", "BUILD_URL", "TF_BUILD", "TRAVIS"].includes(v) || /^(GITHUB|GITLAB|CI|JENKINS|TRAVIS|BITBUCKET|CIRCLE|AGENT|SYSTEM|BUILD|RUNNER|npm)_/.test(v);
+  profile.envVars = [...envVars].filter((v) => !ambient(v)).sort();
+  profile.sysProps = [...sysProps].sort();
+  // optional: read with a default, or only printed; the YAML needn't set them
+  profile.envVarsOptional = profile.envVars.filter((v) => envUse.get(v)?.withDefault || envUse.get(v)?.logOnly);
   profile.grid = {
     hubUrls: [...hubs],
     usesLambdaTestHub: [...hubs].some((h) => h.includes("lambdatest.com")),
@@ -591,6 +762,7 @@ function assessConfidence(profile) {
   // Env vars the tests read that have no value
   const needValues = profile.envVars.filter((v) => !/(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|USERNAME|USER_NAME|CREDENTIAL|AUTH)/i.test(v) && !(profile.testScripts || []).some((s) => v in s.env));
   if (needValues.length) questions.push(`The tests read ${needValues.join(", ")}. What values should the run use?`);
+  if ((profile.sysProps || []).length) questions.push(`The tests read the system propert${profile.sysProps.length === 1 ? "y" : "ies"} ${profile.sysProps.join(", ")} (System.getProperty, no default). What value${profile.sysProps.length === 1 ? "" : "s"} should be passed (-D…)?`);
 
   const level = low.length ? "low" : medium.length ? "medium" : "high";
   profile.confidence = { level, reasons: [...low, ...medium] };
@@ -626,6 +798,7 @@ export function analyzeRepo(repoPath) {
     playwrightProjects: [],
     monorepo: false,
     envVars: [],
+    envVarsOptional: [],
     configFiles: [],
     grid: {},
     existingHyperExecuteYamls: files.filter((f) => /\.ya?ml$/.test(f) && (/hyperexecute/i.test(f) || /^runson\s*:/m.test(read(root, f)))),
@@ -637,9 +810,13 @@ export function analyzeRepo(repoPath) {
   analyzePython(root, files, profile);
   analyzeRuby(root, files, profile);
   analyzeNode(root, files, profile);
+  analyzeOther(root, files, profile);
   analyzeFeatures(root, files, profile);
   analyzeGridAndEnv(root, files, profile);
   profile.frameworks = uniq(profile.frameworks);
+  // all tests are Groovy specs (Spock/Geb): JUnit 4 is only there as Spock's engine
+  const cls = profile.tests.classes;
+  if (cls.length && cls.every((c) => c.file.endsWith(".groovy")) && profile.frameworks.includes("spock")) profile.frameworks = ["spock", ...profile.frameworks.filter((x) => x !== "spock")];
   profile.drivers = uniq(profile.drivers);
   profile.reports = uniq(profile.reports);
   profile.primaryFramework = profile.frameworks[0] || null;

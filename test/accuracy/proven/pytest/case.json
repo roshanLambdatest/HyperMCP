@@ -1,0 +1,14 @@
+{
+  "name": "proven-pytest",
+  "clone": "LambdaTest/pytest-selenium-hyperexecute-sample",
+  "subdir": "",
+  "options": {
+    "concurrency": 2,
+    "embedCredentials": false
+  },
+  "proven": {
+    "on": "2026-10-06",
+    "by": "a real HyperExecute job: tests discovered, ran and reported",
+    "result": "test-failures"
+  }
+}

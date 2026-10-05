@@ -42,4 +42,16 @@ spock hyperexecute-spock-sample hyperexecute.yaml discovered_count The_sample_re
 CASES
 # the RSpec sample splits by example (file:line), so generate the same way
 sed -i.bak "s/\"repo\":/\"options\": { \"splitBy\": \"method\" }, \"repo\":/" "$DIR/ruby-rspec-autosplit/case.json" && rm -f "$DIR/ruby-rspec-autosplit/case.json.bak"
+# proven cases: YAMLs this tool generated that ran on HyperExecute (test/accuracy/proven, credential-free)
+PROVEN="$(cd "$(dirname "$0")/../test/accuracy/proven" && pwd)"
+for c in "$PROVEN"/*/case.json; do
+  n="$(basename "$(dirname "$c")")"
+  clone="$(node -p 'require(process.argv[1]).clone' "$c")"
+  sub="$(node -p 'require(process.argv[1]).subdir' "$c")"
+  local_name="${clone/\//_}"
+  [ -d "$DIR/_repos/$local_name" ] || git clone -q --depth 1 "https://github.com/$clone.git" "$DIR/_repos/$local_name"
+  mkdir -p "$DIR/proven-$n"
+  cp "$(dirname "$c")/expected.yaml" "$DIR/proven-$n/expected.yaml"
+  node -e 'const [f, out, repo] = process.argv.slice(1); const c = require(f); require("fs").writeFileSync(out, JSON.stringify({ name: c.name, repo, options: c.options, source: "https://github.com/" + c.clone }, null, 2))' "$c" "$DIR/proven-$n/case.json" "../_repos/$local_name${sub:+/$sub}"
+done
 echo "Cases in $DIR. Run: HE_ACCURACY_CASES=$DIR npm run accuracy"

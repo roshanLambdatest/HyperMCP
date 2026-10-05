@@ -11,13 +11,16 @@
 //   options        settings the team agreed on for this repo (OS, VMs, split, profile, env values…)
 //   notes          things every teammate's agent should know ("staging needs the tunnel")
 //   passingSetups  the last setups that ran green
-//   fixesThatWorked  failures the team fixed, with the YAML change that made the next run pass
+//   fixesThatWorked  failures the team fixed, with the YAML change that made the next run pass. One that
+//                    worked twice is suggested for promotion; once promoted (remember_for_team promoteFix) it
+//                    is applied when generating for the same framework and language, until a run fails on it.
 // Precedence when generating: explicit options > team options > this user's usual settings.
 // HE_TEAM_MEMORY=off turns it off. Credentials are never written to it.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 import { mask, maskKeepRefs, signature } from "./feedback.js";
 
 const dir = () => process.env.HE_STATE_DIR || path.join(os.homedir(), ".hyperexecute-studio");
@@ -136,7 +139,7 @@ export function recordFixThatWorked({ repo, failure, before, after, how, applied
   if (!k.sig && !k.rules) return null;
   const change = yamlChange(before, after);
   if (!change.added.length && !change.removed.length) return null;
-  const entry = { ...k, headline: mask(failure.headline || "").slice(0, 300), title: failure.title, how, applied: applied?.slice(0, 10), change, framework: profile?.primaryFramework, language: profile?.language, jobId: jobId || undefined };
+  const entry = { ...k, headline: mask(failure.headline || "").slice(0, 300), title: failure.title, how, applied: applied?.slice(0, 10), change, patch: yamlPatch(before, after), framework: profile?.primaryFramework, language: profile?.language, jobId: jobId || undefined };
   try {
     const all = readFixes();
     const old = all.find((e) => sameFailure(k, e));
@@ -151,7 +154,7 @@ export function recordFixThatWorked({ repo, failure, before, after, how, applied
       const t = readTeamMemory(repo) || { options: {}, notes: [], passingSetups: [], fixesThatWorked: [] };
       const rest = t.fixesThatWorked.filter((e) => !sameFailure(k, e));
       const prev = t.fixesThatWorked.find((e) => sameFailure(k, e));
-      t.fixesThatWorked = [{ ...entry, worked: (prev?.worked || 0) + 1, at: new Date().toISOString() }, ...rest].slice(0, 20);
+      t.fixesThatWorked = [{ ...entry, worked: (prev?.worked || 0) + 1, at: new Date().toISOString(), promoted: prev?.promoted, stoppedWorking: prev?.stoppedWorking }, ...rest].slice(0, 20);
       writeTeamMemory(repo, t);
     } catch {}
   }
@@ -167,6 +170,114 @@ export function findLearnedFix({ repo, headline, ruleIds }) {
   if (team) return { ...team, from: "team" };
   const mine = readFixes().find((e) => sameFailure(k, e));
   return mine ? { ...mine, from: "this machine" } : null;
+}
+
+// ---------- promoted team fixes ----------
+
+// The same change as data, top-level key by key, so it can be applied to a newly generated YAML.
+// Lists keep their order: each added item remembers the item it came before. Secrets are never kept.
+const SKIP_KEYS = new Set(["version"]);
+export function yamlPatch(before = "", after = "") {
+  const parse = (t) => { try { return YAML.parse(String(t)) || {}; } catch { return null; } };
+  const a = parse(before), b = parse(after);
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return [];
+  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+  const out = [];
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (SKIP_KEYS.has(k) || same(a[k], b[k])) continue;
+    if (Array.isArray(a[k]) && Array.isArray(b[k]) && b[k].every((x) => typeof x === "string")) {
+      const add = b[k].map((item, i) => ({ item, before: b[k].slice(i + 1).find((n) => a[k].includes(n)) })).filter((x) => !a[k].includes(x.item));
+      out.push({ key: k, add, remove: a[k].filter((x) => !b[k].includes(x)) });
+    } else if (k === "env" && b.env && typeof b.env === "object") {
+      const set = Object.fromEntries(Object.entries(b.env).filter(([n, v]) => !SECRET_NAME.test(n) && !/^LT_/.test(n) && !same(v, a.env?.[n])));
+      if (Object.keys(set).length) out.push({ key: "env", set });
+    } else if (!(k in b)) out.push({ key: k, unset: true });
+    else if (!SECRET_NAME.test(k)) out.push({ key: k, value: b[k] });
+  }
+  return out;
+}
+
+const fixId = (e) => (e.sig || e.rules || "").slice(0, 80);
+const fixLabel = (f) => (f.patch || []).map((p) => p.add?.length ? p.add.map((x) => `Added \`${x.item}\` to ${p.key}`).join("; ") : p.remove?.length ? `Removed \`${p.remove.join("`, `")}\` from ${p.key}` : p.set ? `Set env ${Object.keys(p.set).join(", ")}` : p.unset ? `Removed ${p.key}` : `Set ${p.key}: ${JSON.stringify(p.value)}`).join("; ");
+// generator options and the YAML keys they decide: an explicit option beats a team fix on those keys
+const OPTION_KEYS = { runson: ["runson"], concurrency: ["concurrency"], retryOnFailure: ["retryOnFailure"], maxRetries: ["maxRetries"], globalTimeout: ["globalTimeout", "testSuiteTimeout", "testSuiteStep"], tunnel: ["tunnel", "tunnelOpts"], extraEnv: ["env"], yamlVersion: ["framework", "testDiscovery", "testRunnerCommand"], executionMode: ["autosplit", "matrix", "testSuites"], runnerCommand: ["testRunnerCommand"], discoveryCommand: ["testDiscovery"], includeRuntime: ["runtime"] };
+const matches = (f, profile) => f.framework === profile?.primaryFramework && f.language === profile?.language;
+
+// Team fixes that worked at least twice and nobody promoted yet: suggest them.
+export function promotionCandidates(repo, profile) {
+  return (readTeamMemory(repo)?.fixesThatWorked || []).filter((f) => (f.worked || 0) >= 2 && !f.promoted && f.patch?.length && (!profile || matches(f, profile)))
+    .map((f) => ({ promoteFix: fixId(f), worked: f.worked, change: fixLabel(f), failure: f.headline || f.title, how: `remember_for_team with promoteFix: "${fixId(f)}" applies it to every new YAML for ${f.framework} (${f.language})` }));
+}
+
+// Promote (or re-enable) a team fix so generation applies it.
+export function promoteTeamFix(repo, id) {
+  const t = readTeamMemory(repo);
+  const f = t?.fixesThatWorked.find((e) => fixId(e) === id || e.headline === id);
+  if (!f) throw new Error(`No team fix "${id}" in ${TEAM_FILE}.`);
+  if (!f.patch?.length) throw new Error("That fix has no change that can be applied to a new YAML.");
+  f.promoted = new Date().toISOString().slice(0, 10);
+  delete f.stoppedWorking;
+  writeTeamMemory(repo, t);
+  return { promoted: fixId(f), change: fixLabel(f), framework: f.framework, language: f.language, worked: f.worked };
+}
+
+// Apply the promoted team fixes for this framework and language to a generated YAML, after the normal rules.
+// Returns { yaml, applied: [labels], skipped: [labels] }. A fix that adds a validation error (`isValid` false) is skipped.
+export function applyTeamFixes(yamlText, profile, repo, explicit = {}, isValid = () => true) {
+  const fixes = (readTeamMemory(repo)?.fixesThatWorked || []).filter((f) => f.promoted && !f.stoppedWorking && f.patch?.length && matches(f, profile));
+  const applied = [], skipped = [];
+  let text = yamlText;
+  for (const f of fixes) {
+    const label = `${fixLabel(f)} (team fix, worked ${f.worked}×)`;
+    const owner = Object.keys(explicit).find((o) => (OPTION_KEYS[o] || []).some((k) => f.patch.some((p) => p.key === k)));
+    if (owner) { skipped.push(`${label}: skipped, you set ${owner}`); continue; }
+    const doc = YAML.parseDocument(text);
+    let changed = false;
+    for (const p of f.patch) {
+      if (p.add || p.remove) {
+        const list = doc.get(p.key);
+        if (list && !YAML.isSeq(list)) continue;
+        const seq = list || doc.createNode([]);
+        for (const r of p.remove || []) { const i = seq.items.findIndex((n) => String(n.value ?? n) === r); if (i >= 0) { seq.items.splice(i, 1); changed = true; } }
+        for (const { item, before } of p.add || []) {
+          if (seq.items.some((n) => String(n.value ?? n) === item)) continue;
+          const at = before === undefined ? -1 : seq.items.findIndex((n) => String(n.value ?? n) === before);
+          seq.items.splice(at < 0 ? seq.items.length : at, 0, doc.createNode(item));
+          changed = true;
+        }
+        if (!list && seq.items.length) doc.set(p.key, seq);
+      } else if (p.set) {
+        for (const [n, v] of Object.entries(p.set)) if (JSON.stringify(doc.getIn([p.key, n])) !== JSON.stringify(v)) { doc.setIn([p.key, n], v); changed = true; }
+      } else if (p.unset) { if (doc.has(p.key)) { doc.delete(p.key); changed = true; } }
+      else if (JSON.stringify(doc.get(p.key)) !== JSON.stringify(p.value)) { doc.set(p.key, p.value); changed = true; }
+    }
+    if (!changed) continue;
+    const next = doc.toString({ lineWidth: 0 });
+    if (!isValid(next)) { skipped.push(`${label}: skipped, it would make the YAML invalid`); continue; }
+    text = next;
+    applied.push(label);
+  }
+  return { yaml: text, applied, skipped };
+}
+
+// A run failed on what a promoted fix added: stop applying it (remember_for_team promoteFix re-enables it).
+export function markStoppedTeamFixes(repo, failureText = "") {
+  const t = readTeamMemory(repo);
+  if (!t || !failureText) return [];
+  const stopped = [];
+  for (const f of t.fixesThatWorked) {
+    if (!f.promoted || f.stoppedWorking) continue;
+    const added = (f.patch || []).flatMap((p) => [...(p.add || []).map((x) => x.item), ...(p.set ? Object.values(p.set).map(String) : []), ...(p.value !== undefined && typeof p.value !== "object" ? [String(p.value)] : [])]);
+    if (added.some((a) => a.length >= 6 && failureText.includes(a))) { f.stoppedWorking = new Date().toISOString().slice(0, 10); stopped.push(fixLabel(f)); }
+  }
+  if (stopped.length) writeTeamMemory(repo, t);
+  return stopped;
+}
+
+// This machine's fixes for the same framework and language: listed, never applied.
+export function personalFixSuggestions(profile) {
+  if (!enabled()) return [];
+  return readFixes().filter((f) => matches(f, profile)).slice(0, 3).map((f) => ({ failure: f.headline || f.title, worked: f.worked, change: f.change }));
 }
 
 // ---------- this user's usual settings ----------

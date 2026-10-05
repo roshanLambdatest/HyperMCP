@@ -1,0 +1,44 @@
+---
+# HyperExecute YAML generated for: specflow-selenium-hyperexecute-sample
+# Framework: specflow | Language: csharp | Build: dotnet
+# YAML 0.1 | Mode: matrix | Split by: tag
+# Run: ./hyperexecute --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config hyperexecute.yaml
+
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+retryOnFailure: true
+maxRetries: 1
+concurrency: 2
+runtime:
+  language: dotnet
+  version: "8.0"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "OnlySpecTest.csproj" }}'
+cacheDirectories:
+  - nuget_cache
+pre:
+  - dotnet restore OnlySpecTest.sln
+  - dotnet build OnlySpecTest.sln --no-restore
+post:
+  - ls -la
+matrix:
+  tag:
+    - LoginTest_Success
+    - LoginTest_Failure
+    - ToDoTest
+testSuites:
+  - dotnet test OnlySpecTest.sln --no-build --logger "trx;LogFileName=results-$RANDOM.trx" --results-directory TestResults --filter "TestCategory=$tag"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: TestResults
+    path:
+      - TestResults/**
+jobLabel:
+  - specflow
+  - linux
+  - matrix

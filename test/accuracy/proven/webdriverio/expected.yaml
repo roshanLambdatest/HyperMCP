@@ -1,0 +1,44 @@
+---
+# HyperExecute YAML generated for: WebdriverIO-HyperExecute-Sample
+# Framework: webdriverio | Language: node | Build: npm
+# YAML 0.1 | Mode: autosplit | Split by: file
+# Run: ./hyperexecute --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config hyperexecute.yaml
+
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 2
+runtime:
+  language: node
+  version: "20"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+  LT_BUILD_NAME: <set LT_BUILD_NAME>
+cacheKey: '{{ checksum "package.json" }}'
+cacheDirectories:
+  - node_modules
+pre:
+  - npm install
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: find tests/specs -type f \( -name '*.js' -o -name '*.ts' \) -not -path '*/node_modules/*' | sed 's#^\./##'
+testRunnerCommand: npx wdio run conf/wdio.conf.js --spec "$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - reports/**
+      - allure-results/**
+jobLabel:
+  - webdriverio
+  - linux
+  - autosplit

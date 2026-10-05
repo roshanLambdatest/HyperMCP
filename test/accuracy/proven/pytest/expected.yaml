@@ -1,0 +1,47 @@
+---
+# HyperExecute YAML generated for: pytest-selenium-hyperexecute-sample
+# Framework: pytest | Language: python | Build: -
+# YAML 0.1 | Mode: autosplit | Split by: file
+# Run: ./hyperexecute --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config hyperexecute.yaml
+
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 2
+runtime:
+  language: python
+  version: "3.11"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "requirements.txt" }}'
+cacheDirectories:
+  - pip_cache
+pre:
+  - pip3 install -r requirements.txt --cache-dir pip_cache
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: grep -rlE --include='*.py' '^[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test' . | grep -vE '(^|/)(conftest|setup)\.py$|/(venv|\.venv|site-packages)/' | sed 's#^\./##'
+testRunnerCommand: python3 -m pytest "$test" --junitxml=reports/junit-$RANDOM.xml
+mergeArtifacts: true
+uploadArtefacts:
+  - name: Reports
+    path:
+      - reports/**
+report: true
+partialReports:
+  location: reports/
+  type: xml
+  frameworkName: junit
+jobLabel:
+  - pytest
+  - linux
+  - autosplit

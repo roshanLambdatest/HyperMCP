@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 {
   const os = await import("node:os");
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off", HE_GISTS: "off", HE_DOCS: "off" });
+  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off", HE_GISTS: "off", HE_DOCS: "off", HE_UPDATE_CHECK: "off" });
 }
 const fx = (n) => path.join(here, "fixtures", n);
 
@@ -84,10 +84,14 @@ check("validator catches bad runson / missing $test / typo / secret / spelling",
 
 
 // YAML v0.2
-g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng") });
-check("testng auto → v0.2 framework block", g.text.includes("version: \"0.2\"") && g.text.includes("name: maven/testng") && g.text.includes("discoveryMode: remote") && !/^testDiscovery:/m.test(g.text), g.text);
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng"), yamlVersion: "0.2" });
+check("testng v0.2 → framework block", g.text.includes("version: \"0.2\"") && g.text.includes("name: maven/testng") && g.text.includes("discoveryMode: remote") && !/^testDiscovery:/m.test(g.text), g.text);
 console.log(g.text, "\n");
-g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng"), splitBy: "suite", groups: "smoke" });
+{
+  const auto = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng") });
+  check("testng auto → v0.1 (Java v0.2 discovery found 0 tests in real jobs)", /^version: 0\.1/m.test(auto.text) && /testRunnerCommand: mvn test/.test(auto.text) && /clean test-compile/.test(auto.text), auto.text.slice(0, 600));
+}
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng"), splitBy: "suite", groups: "smoke", yamlVersion: "0.2" });
 check("v0.2 suite → xmltest + groups", g.text.includes("discoveryType: xmltest") && g.text.includes("-Dgroups=smoke"), g.text);
 g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-testng"), executionMode: "matrix", yamlVersion: "0.2" });
 check("v0.2 + matrix rejected", g.isError, g.text);
@@ -211,7 +215,7 @@ d = JSON.parse((await call("dry_run_test_discovery", { repoPath: fx("gradle-kts"
 check("gradle multi-module: each item is a module task", d.items.includes("api-tests:test --tests com.acme.api.UsersApiTest") && g.text.includes("./gradlew :$test"), d);
 a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-profiles") })).text);
 check("maven profiles → medium confidence + question", a.confidence.level === "medium" && a.questions.some((q) => /Maven profile/.test(q)) && Object.keys(a)[0] === "confidence", a.confidence);
-g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-profiles"), mavenProfile: "smoke" });
+g = await call("generate_hyperexecute_yaml", { repoPath: fx("maven-profiles"), mavenProfile: "smoke", yamlVersion: "0.2" });
 check("mavenProfile → v0.2 flags -Psmoke", /flags:\n\s+- -Psmoke/.test(g.text) && g.text.includes("Confirm with the user"), g.text);
 a = JSON.parse((await call("analyze_repo", { repoPath: fx("pyproject-only") })).text);
 g = await call("generate_hyperexecute_yaml", { repoPath: fx("pyproject-only") });
@@ -246,6 +250,19 @@ rv = JSON.parse((await call("review_diagnosis_feedback", { markReviewed: [rv.unm
 check("markReviewed clears the group", rv.moved === 2 && rv.unmatched.length === 0, rv);
 dk = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: fx("maven-testng"), logText: "Tests run: 5, Failures: 2\njava.lang.AssertionError: expected [x] but found [y]" })).text);
 check("recognized failures are not saved", !dk.savedForReview, dk);
+
+// headline: the line that names the failure, not the noise around it (shapes from real HyperExecute logs)
+const { headline, signature } = await import("../src/feedback.js");
+const cacheMiss = 'level=error name=drone-cache ts=2026-10-05T17:02:14Z caller=main.go:672 err="restore cache, restore failed"\nRESPONSE 404: 404 The specified blob does not exist.\nERROR CODE: BlobNotFound\nTime:2026-10-05T17:07:37.1622118Z</Message></Error>';
+const mvnNoise = "Progress (2): 14 kB | 4.1/37 kB\rDownloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/maven-error-diagnostics/2.0.6/maven-error-diagnostics-2.0.6.jar (14 kB at 137 kB/s)\n[ERROR] -> [Help 1]\n[ERROR] -----------------------------------------------------";
+const summary = '{\n    "remark": "Job failed as encountered a Test level failure",\n        "status": "failed",\n            "status": "failed",\n}';
+check("headline skips cache misses, Maven downloads and summary JSON; uses the platform remark",
+  headline(`${cacheMiss}\n${mvnNoise}\n2026-10-05T23:21:38+05:30    error    Exiting with error: Failed tasks found.\n FAILED\n${summary}`) === "Job failed as encountered a Test level failure");
+check("headline prefers the exception over the job summary",
+  headline(`${cacheMiss}\n[ERROR] Internal error: java.lang.RuntimeException: Minimum surefire version supported is 2.19.1\n${summary}`).includes("Minimum surefire version"));
+const spin = (s, t) => `\r\r${s} 14/14 stages completed  [${t}s] 2026-10-06T00:02:37+05:30    error    ERR::JOB::STS     Job lambda_error!`;
+check("headline drops the CLI spinner and timestamp, so the same error groups across runs",
+  headline(spin("⠴", 31)) === "error ERR::JOB::STS Job lambda_error!" && signature(headline(spin("⠴", 31))) === signature(headline(spin("⠼", 32))), headline(spin("⠴", 31)));
 
 // ---------- discovery check: a green run with 0 tests is not "passed" ----------
 {
@@ -370,12 +387,43 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   const lf = fs.existsSync(learnedFile) ? JSON.parse(fs.readFileSync(learnedFile, "utf8")) : [];
   const team6 = JSON.parse(fs.readFileSync(path.join(repo6, ".hyperexecute", "team.json"), "utf8"));
   check("learning: a fix that made the next run pass is remembered", f1d.status !== "passed" && f2d.status === "passed" && /remembered/.test(f2d.learned || "") && lf[0]?.change?.added.some((l) => /tunnel: true/.test(l)) && team6.fixesThatWorked?.[0]?.worked === 1, JSON.stringify({ s1: f1d.status, s2: f2d.status, learned: f2d.learned, lf: lf[0] }).slice(0, 600));
+  check("learning: the fix is also kept as a change that can be applied", team6.fixesThatWorked?.[0]?.patch?.some((p) => p.key === "tunnel" && p.value === true), JSON.stringify(team6.fixesThatWorked?.[0]?.patch));
   const repo7 = fs.mkdtempSync(path.join(os.tmpdir(), "he-fixlearn2-"));
   fs.cpSync(fx("maven-testng"), repo7, { recursive: true });
   await call("generate_hyperexecute_yaml", { repoPath: repo7, yamlVersion: "0.1", write: true, embedCredentials: false, useLearned: false, extraEnv: { BASE_URL: "https://example.com" } });
   const g1 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo7 })).text);
   const g1d = JSON.parse((await call("get_hyperexecute_run", { runId: g1.runId, waitSeconds: 30 })).text);
   check("learning: the same failure later shows the fix that worked", g1d.fixedBefore?.change?.added?.some((l) => /tunnel: true/.test(l)) && g1d.fixedBefore.from === "this machine", JSON.stringify(g1d.fixedBefore || g1d).slice(0, 400));
+
+  // promoted team fixes: suggested after 2 wins, applied once promoted (same framework + language only)
+  const repo8 = fs.mkdtempSync(path.join(os.tmpdir(), "he-teamfix-"));
+  fs.cpSync(fx("maven-testng"), repo8, { recursive: true });
+  const fixA = { sig: "pre failed exit 126", rules: "", headline: "./mvnw: Permission denied", framework: "testng", language: "java", worked: 2, change: { added: ["  - echo team-fix-a"], removed: [] }, patch: [{ key: "pre", add: [{ item: "echo team-fix-a" }], remove: [] }] };
+  const fixB = { sig: "too many vms", rules: "", headline: "Concurrency limit", framework: "testng", language: "java", worked: 3, promoted: "2026-10-01", change: { added: ["concurrency: 3"], removed: [] }, patch: [{ key: "concurrency", value: 3 }] };
+  fs.mkdirSync(path.join(repo8, ".hyperexecute"));
+  fs.writeFileSync(path.join(repo8, ".hyperexecute", "team.json"), JSON.stringify({ options: {}, notes: [], passingSetups: [], fixesThatWorked: [fixA, fixB] }));
+  const gen8 = (extra = {}) => call("generate_hyperexecute_yaml", { repoPath: repo8, yamlVersion: "0.1", embedCredentials: false, extraEnv: { BASE_URL: "https://example.com" }, ...extra });
+  let t8 = await gen8();
+  check("team fixes: worked twice is suggested, not applied", /promoteFix suggestion/.test(t8.text) && /promoteFix: "pre failed exit 126"/.test(t8.text) && !/echo team-fix-a/.test(t8.text.split("```")[1]), t8.text.slice(-1200));
+  check("team fixes: this machine's fixes are only listed", /suggestedFixes[^\n]*\n- [^\n]*ERR_NAME_NOT_RESOLVED[^\n]*\+tunnel: true/.test(t8.text) && !/team fix[^\n]*tunnel/.test(t8.text), t8.text.slice(-900));
+  const pr = JSON.parse((await call("remember_for_team", { repoPath: repo8, promoteFix: "pre failed exit 126" })).text);
+  t8 = await gen8();
+  const y8 = YAML.parse(t8.text.split("```yaml")[1].split("```")[0].replace(/\$\{\{[^}]*\}\}/g, "x"));
+  check("team fixes: promoted fix applied and listed", pr.promoted && y8.pre.includes("echo team-fix-a") && y8.concurrency === 3 && /Added `echo team-fix-a` to pre \(team fix, worked 2×\)/.test(t8.text) && /Validation: OK/.test(t8.text), t8.text.slice(-1200));
+  check("team fixes: same repo + team.json → same YAML", (await gen8()).text === t8.text);
+  const t8x = await gen8({ concurrency: 5 });
+  check("team fixes: explicit option wins and says so", /concurrency: 5/.test(t8x.text) && /skipped, you set concurrency/.test(t8x.text) && /echo team-fix-a/.test(t8x.text), t8x.text.slice(-900));
+  check("team fixes: useLearned:false turns them off", !/echo team-fix-a|concurrency: 3/.test((await gen8({ useLearned: false })).text));
+  const repo9 = fs.mkdtempSync(path.join(os.tmpdir(), "he-teamfix2-"));
+  fs.cpSync(fx("pytest"), repo9, { recursive: true });
+  fs.cpSync(path.join(repo8, ".hyperexecute"), path.join(repo9, ".hyperexecute"), { recursive: true });
+  check("team fixes: another framework doesn't get them", !/echo team-fix-a/.test((await call("generate_hyperexecute_yaml", { repoPath: repo9, embedCredentials: false })).text));
+  const { markStoppedTeamFixes } = await import("../src/learning.js");
+  const stopped = markStoppedTeamFixes(repo8, "pre stage failed\n******* echo team-fix-a *******\nexit status 1");
+  const tm8 = JSON.parse(fs.readFileSync(path.join(repo8, ".hyperexecute", "team.json"), "utf8"));
+  check("team fixes: a failure on the fix's line stops it", stopped.length === 1 && tm8.fixesThatWorked.find((f) => f.sig === "pre failed exit 126").stoppedWorking && !/echo team-fix-a/.test((await gen8()).text.split("```")[1]), JSON.stringify(tm8.fixesThatWorked).slice(0, 500));
+  await call("remember_for_team", { repoPath: repo8, promoteFix: "pre failed exit 126" });
+  check("team fixes: promoteFix re-enables a stopped fix", /echo team-fix-a/.test((await gen8()).text.split("```")[1]));
 
   // the session as a document: preview, then a Confluence page (stand-in server)
   let doc = (await call("publish_to_confluence", { repoPath: repo6, preview: true })).text;
@@ -418,8 +466,9 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
     { id: "aaaa1111aaaa1111aaaa", description: "Maestro yaml for the kiosk app", updated_at: "2026-10-01T00:00:00Z", owner: { login: "FieldEngineer" }, files: { "maestro.yaml": { filename: "maestro.yaml", size: 200, raw_url: "RAW/maestro.yaml" } } },
     { id: "bbbb2222bbbb2222bbbb", description: "", updated_at: "2026-10-01T00:00:00Z", owner: { login: "FieldEngineer" }, files: { "LT_MAC_Creds": { filename: "LT_MAC_Creds", size: 30, raw_url: "RAW/creds" } } },
   ];
-  let rawHits = 0;
+  let rawHits = 0, releaseHits = 0;
   const gh = http.createServer((req, res) => {
+    if (req.url === "/repos/roshanLambdatest/HyperMCP/releases/latest") { releaseHits++; res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify({ tag_name: "v99.0.0" })); }
     if (req.url.startsWith("/users/FieldEngineer/gists")) { res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify(req.url.includes("page=1") ? listing : [])); }
     if (req.url === "/RAW/maestro.yaml") { rawHits++; return res.end("version: 0.1\nrunson: android\npre:\n  - curl -Ls https://get.maestro.mobile.dev | bash\ntestRunnerCommand: hyperexecute --user fieldguy --key LT_abcdefghijklmnopqrstuvwxyz0123 && maestro test $test\nenv:\n  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}\n"); }
     if (req.url === "/RAW/creds") return res.end("user=x key=y");
@@ -450,7 +499,38 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
     process.env.HE_GISTS = was;
   }
   check("gists: shown in knowledge_base_status", status.gists?.gists === 2 && status.gists.files === 1, JSON.stringify(status.gists));
+  check("update check: off in this env, no request", releaseHits === 0 && !status.update);
+
+  // a newer release (stand-in GitHub): knowledge_base_status shows it, one note per session, checked once a day
+  {
+    const upd = fs.mkdtempSync(path.join(os.tmpdir(), "he-update-"));
+    const start = async () => { await client.close(); await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...env, HE_STATE_DIR: upd, HE_UPDATE_CHECK: "" } })); };
+    await start();
+    let r, st;
+    for (let i = 0; i < 50; i++) { r = await client.callTool({ name: "knowledge_base_status", arguments: {} }); st = JSON.parse(r.content[0].text); if (st.update) break; await new Promise((ok) => setTimeout(ok, 100)); }
+    check("update check: newer release shown in knowledge_base_status", st.update?.latest === "99.0.0" && /clear-npx-cache/.test(st.update.how), JSON.stringify(st.update));
+    const r2 = await client.callTool({ name: "knowledge_base_status", arguments: {} });
+    check("update check: one note in the session, as its own block", /HyperExecute Studio 99\.0\.0 is available \(you have \d/.test(r.content[1]?.text || "") && r2.content.length === 1, JSON.stringify(r.content.slice(1)));
+    await start();
+    let st2;
+    for (let i = 0; i < 50 && !st2?.update; i++) { st2 = JSON.parse((await call("knowledge_base_status", {})).text); if (!st2.update) await new Promise((ok) => setTimeout(ok, 100)); }
+    check("update check: at most once a day (cached)", releaseHits === 1 && st2?.update?.latest === "99.0.0", JSON.stringify({ releaseHits, u: st2?.update }));
+  }
   gh.close();
+}
+
+// HyperExecute doesn't expand $(…): the validator refuses it and the generator never emits it
+{
+  const bad = JSON.parse((await call("validate_hyperexecute_yaml", { yamlContent: "version: 0.1\nrunson: linux\nautosplit: true\npre:\n  - export V=$(cat VERSION)\ntestDiscovery:\n  type: raw\n  mode: static\n  command: ls tests\ntestRunnerCommand: npx jest \"$test\"\n" })).text);
+  check("validator: $(…) in a command is an error", bad.errors.some((e) => /pre uses \$\(…\).*only \$\{VAR\}/.test(e)), bad.errors);
+  const emitted = [];
+  for (const f of fs.readdirSync(path.join(here, "fixtures"))) {
+    for (const opts of [{}, { yamlVersion: "0.1" }, { yamlVersion: "0.1", splitBy: "method" }]) {
+      const r = await call("generate_hyperexecute_yaml", { repoPath: fx(f), ...opts });
+      if (!r.isError && /\$\(/.test((r.text.match(/```yaml\n([\s\S]*?)```/) || [])[1] || "")) emitted.push(`${f} ${JSON.stringify(opts)}`);
+    }
+  }
+  check("generator: no $(…) in any generated YAML", !emitted.length, emitted);
 }
 
 // a repo can keep its own fake test data out of the credential scan

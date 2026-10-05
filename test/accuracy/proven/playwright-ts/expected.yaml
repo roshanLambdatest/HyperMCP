@@ -1,0 +1,44 @@
+---
+# HyperExecute YAML generated for: Playwright-Hyperexecute-Typescript-sample
+# Framework: playwright | Language: node | Build: npm
+# YAML 0.1 | Mode: autosplit | Split by: file
+# Run: ./hyperexecute --user "$LT_USERNAME" --key "$LT_ACCESS_KEY" --config hyperexecute.yaml
+
+version: 0.1
+globalTimeout: 90
+testSuiteTimeout: 90
+testSuiteStep: 90
+runson: linux
+autosplit: true
+retryOnFailure: true
+maxRetries: 1
+concurrency: 2
+runtime:
+  language: node
+  version: "20"
+env:
+  LT_USERNAME: ${{ .secrets.LT_USERNAME }}
+  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}
+cacheKey: '{{ checksum "package.json" }}'
+cacheDirectories:
+  - node_modules
+pre:
+  - npm install
+  - npx playwright install --with-deps
+post:
+  - ls -la
+testDiscovery:
+  type: raw
+  mode: remote
+  command: find tests -type f \( -name '*.spec.*' -o -name '*.test.*' \) -not -path '*/node_modules/*' | sed 's#^\./##'
+testRunnerCommand: npx playwright test "$test"
+mergeArtifacts: true
+uploadArtefacts:
+  - name: PlaywrightReport
+    path:
+      - playwright-report/**
+      - test-results/**
+jobLabel:
+  - playwright
+  - linux
+  - autosplit

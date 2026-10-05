@@ -69,8 +69,11 @@ export function checkSchema(value, schema, at = "", out = []) {
   return out;
 }
 
-const V02_NAMES = ["maven/testng", "maven/junit4", "maven/junit5", "maven/spock", "gradle/testng", "gradle/junit4", "gradle/junit5", "gradle/junit6", "gradle/spock", "dotnet/mstest", "dotnet/nunit"];
+const V02_NAMES = ["maven/testng", "maven/junit4", "maven/junit5", "maven/spock", "gradle/testng", "gradle/junit4", "gradle/junit5", "gradle/junit6", "gradle/spock", "dotnet/mstest", "dotnet/nunit", "wdio/mocha", "wdio/jasmine"];
+// app-testing runners: they run on real devices (runson android/ios) or a raw command, and keep testDiscovery
+const V02_APP = ["android/espresso", "ios/xcui", "appium", "raw"];
 const RUNSON = ["linux", "mac", "mac13", "win", "win11"];
+const RUNSON_DEVICE = ["android", "ios"];
 const REPORT_FRAMEWORKS = ["extent", "extent-native", "testng", "cucumber", "junit", "allure", "playwright", "specflow", "karate", "robot", "katalon", "cypress"];
 
 function lev(a, b) {
@@ -121,7 +124,9 @@ export function validateYaml(text, repoPath) {
     const key = String(doc.runson).match(/matrix\.(\w+)/)?.[1];
     if (!doc.matrix || !doc.matrix[key]) errors.push(`runson references \${matrix.${key}} but matrix.${key} is not defined.`);
     else for (const os of doc.matrix[key]) if (!RUNSON.includes(os)) errors.push(`matrix.${key} contains "${os}" — allowed: ${RUNSON.join(", ")}.`);
-  } else if (!RUNSON.includes(doc.runson)) errors.push(`runson "${doc.runson}" is invalid — allowed: ${RUNSON.join(", ")}.`);
+  } else if (RUNSON_DEVICE.includes(doc.runson)) {
+    if (!V02_APP.includes(doc.framework?.name)) errors.push(`runson "${doc.runson}" is for real-device app tests (framework ${V02_APP.slice(0, 3).join(", ")}); browser and code tests use ${RUNSON.join(", ")}.`);
+  } else if (!RUNSON.includes(doc.runson)) errors.push(`runson "${doc.runson}" is invalid — allowed: ${RUNSON.join(", ")}, or ${RUNSON_DEVICE.join("/")} for real-device app tests.`);
   if (!doc.pre && !doc.preDirectives && String(doc.version) !== "0.2") warnings.push("No `pre` steps — dependencies won't be installed on the VM.");
   else if (doc.pre && !Array.isArray(doc.pre)) errors.push("`pre` must be a list of commands.");
   if (doc.post && !Array.isArray(doc.post)) errors.push("`post` must be a list of commands.");
@@ -131,7 +136,13 @@ export function validateYaml(text, repoPath) {
     const fw = doc.framework;
     if (!fw?.name) errors.push("v0.2 requires `framework.name` (e.g. maven/testng, gradle/junit5, dotnet/nunit).");
     else {
-      if (!V02_NAMES.includes(fw.name)) errors.push(`framework.name "${fw.name}" is not a v0.2 runner — allowed: ${V02_NAMES.join(", ")}.`);
+      if (!V02_NAMES.includes(fw.name) && !V02_APP.includes(fw.name)) errors.push(`framework.name "${fw.name}" is not a v0.2 runner — allowed: ${[...V02_NAMES, ...V02_APP].join(", ")}.`);
+      if (/^(android\/espresso|ios\/xcui)$/.test(fw.name)) {
+        const a = fw.args || {};
+        if (!a.appPath && !a.appId) errors.push(`${fw.name} needs framework.args.appPath (a build in the repo) or appId (lt://…).`);
+        if (!a.testSuitePath && !a.testSuiteAppId) errors.push(`${fw.name} needs framework.args.testSuitePath or testSuiteAppId (lt://…).`);
+        if (String(a.appId || "").startsWith("<set") || String(a.testSuiteAppId || "").startsWith("<set")) errors.push(`${fw.name}: fill in the lt://… ids of the uploaded builds.`);
+      }
       const remoteOnly = /^(gradle\/|maven\/spock|dotnet\/)/.test(fw.name);
       if (remoteOnly && ["local", "static"].includes(fw.discoveryMode)) errors.push(`${fw.name} only supports remote discovery.`);
       if (fw.discoveryMode && !["local", "remote"].includes(fw.discoveryMode)) errors.push(`framework.discoveryMode "${fw.discoveryMode}" — expected local or remote.`);
@@ -142,10 +153,11 @@ export function validateYaml(text, repoPath) {
       for (const k of ["flags", "discoveryFlags", "runnerFlags"]) if (fw[k] && !Array.isArray(fw[k])) errors.push(`framework.${k} must be a list.`);
       if (fw.defaultReports === true && doc.report === true) errors.push("v0.2: framework.defaultReports: true must not be combined with report: true.");
     }
-    if (doc.testDiscovery) errors.push("v0.2 YAML must NOT contain testDiscovery — it silently routes the job to the v0.1 path and runs 0 tests. Use framework.discoveryMode instead.");
-    if (doc.testRunnerCommand) warnings.push("testRunnerCommand is obsolete in v0.2 — the framework runner builds the command.");
+    const appRunner = V02_APP.includes(fw?.name);
+    if (doc.testDiscovery && !appRunner) errors.push("v0.2 YAML must NOT contain testDiscovery — it silently routes the job to the v0.1 path and runs 0 tests. Use framework.discoveryMode instead.");
+    if (doc.testRunnerCommand && !appRunner) warnings.push("testRunnerCommand is obsolete in v0.2 — the framework runner builds the command.");
     if (doc.matrix) errors.push("Matrix mode is not supported in v0.2.");
-    if (doc.autosplit !== true) errors.push("v0.2 framework discovery requires autosplit: true.");
+    if (doc.autosplit !== true && !(appRunner && fw?.args?.shards)) errors.push("v0.2 framework discovery requires autosplit: true (manual sharding of app tests is the exception).");
     if (doc.cacheKey && doc.cacheDirectories) info.push("cacheKey + cacheDirectories disable v0.2's automatic ~/.m2 / ~/.gradle / ~/.nuget caching.");
   } else if (doc.framework) {
     warnings.push("`framework` is a v0.2 field — set version: \"0.2\" (and remove testDiscovery/testRunnerCommand) or drop it.");
@@ -206,6 +218,16 @@ export function validateYaml(text, repoPath) {
     if (k === "LT_ACCESS_KEY" && s && !s.includes("secrets.") && !s.startsWith("$") && !s.startsWith("<")) info.push("env.LT_ACCESS_KEY holds a LambdaTest access key — keep this file out of shared repos.");
     else if (/(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && s && !s.includes("secrets.") && !s.startsWith("$") && !s.startsWith("<")) warnings.push(`env.${k} looks like a hard-coded secret — use \${{ .secrets.${k} }}.`);
     if (s.startsWith("<set ")) errors.push(`env.${k} still has a placeholder value.`);
+  }
+  // HyperExecute substitutes ${VAR} itself and refuses anything else that starts with "$(" (even inside
+  // quotes or awk): "env: Only ${VARNAME} expansion is supported"
+  const lists = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  for (const [where, cmds] of [["pre", lists(doc.pre)], ["post", lists(doc.post)], ["testDiscovery.command", lists(doc.testDiscovery?.command)], ["testRunnerCommand", lists(doc.testRunnerCommand)], ["testSuites", lists(doc.testSuites)], ["preDirectives.commands", lists(doc.preDirectives?.commands)]]) {
+    if (cmds.some((c) => typeof c === "string" && c.includes("$("))) errors.push(`${where} uses $(…): HyperExecute doesn't expand $(…), only \${VAR}. Use a pipe, xargs, or awk instead of command substitution.`);
+  }
+  for (const [where, cmd] of [["testRunnerCommand", doc.testRunnerCommand], ...(Array.isArray(doc.pre) ? doc.pre : []).map((c, i) => [`pre[${i}]`, c])]) {
+    const m = String(cmd || "").match(/<set ([\w.-]+)>/);
+    if (m) errors.push(`${where} still has a placeholder for ${m[1]} (a -D system property the tests read): ask the user for its value.`);
   }
 
   // reports / artefacts

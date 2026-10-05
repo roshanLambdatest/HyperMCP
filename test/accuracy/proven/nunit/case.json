@@ -1,0 +1,17 @@
+{
+  "name": "proven-nunit",
+  "clone": "LambdaTest/nunit-selenium-hyperexecute-sample",
+  "subdir": "",
+  "options": {
+    "concurrency": 2,
+    "embedCredentials": false,
+    "extraEnv": {
+      "DISABLE_FIREFOX": "true"
+    }
+  },
+  "proven": {
+    "on": "2026-10-06",
+    "by": "a real HyperExecute job: tests discovered, ran and reported",
+    "result": "passed"
+  }
+}
