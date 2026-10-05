@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js", "yaml-explain.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -51,6 +51,20 @@ function activate(context) {
     vscode.commands.registerCommand("hyperexecute.setAnthropicKey", () => setAnthropicKey(context)),
     vscode.commands.registerCommand("hyperexecute.chooseBackend", () => chooseBackend(context)),
     vscode.commands.registerCommand("hyperexecute.validateActiveFile", () => validateActive()),
+    vscode.commands.registerCommand("hyperexecute.annotateActiveFile", () => {
+      const ed = vscode.window.activeTextEditor;
+      if (!ed) return vscode.window.showInformationMessage("Open a HyperExecute YAML first.");
+      return openAnnotated(ed.document.getText(), path.basename(ed.document.fileName));
+    }),
+    // hover over a line of a hyperexecute*.yaml file: what it does on HyperExecute
+    vscode.languages.registerHoverProvider({ language: "yaml", pattern: "**/*hyperexecute*.{yml,yaml}" }, {
+      async provideHover(doc, pos) {
+        const c = await loadCore();
+        const l = c.explainYamlLines(doc.getText()).find((x) => x.n === pos.line + 1);
+        if (!l?.what || l.kind === "blank" || l.kind === "continued") return null;
+        return new vscode.Hover(new vscode.MarkdownString(`**HyperExecute**${l.path ? ` · \`${l.path}\`` : ""}\n\n${l.what}`));
+      },
+    }),
     vscode.window.registerWebviewViewProvider(
       "hyperexecute.studio",
       {
@@ -354,7 +368,18 @@ class Studio {
     this.webview?.postMessage(msg);
   }
   push() {
+    this.state.explain = this.explainLines();
+    this.state.onDisk = this.diskState();
     this.post({ type: "state", state: this.state });
+  }
+  // is the YAML in the Studio the one saved in the repo? "same" | "different" | "none"
+  diskState() {
+    if (!this.state.repo || !this.state.yaml) return "none";
+    try { return fs.readFileSync(path.join(this.state.repo, this.outputName()), "utf8") === this.state.yaml ? "same" : "different"; } catch { return "none"; }
+  }
+  // the current YAML explained line by line, for the Explain tab
+  explainLines() {
+    try { return core?.explainYamlLines ? core.explainYamlLines(this.state.yaml || "") : []; } catch { return []; }
   }
   busy(label) {
     this.post({ type: "busy", label: label || null });
@@ -417,7 +442,7 @@ class Studio {
         this.state.yaml = m.yaml;
         this.state.dirty = true;
         this.state.validation = strip(c.validateYaml(m.yaml, this.state.repo));
-        this.post({ type: "validation", validation: this.state.validation, dirty: true });
+        this.post({ type: "validation", validation: this.state.validation, dirty: true, explain: this.explainLines() });
         break;
       case "chat":
         await this.chat(m.text);
@@ -466,7 +491,7 @@ class Studio {
         if (/^https:\/\//.test(m.url)) vscode.env.openExternal(vscode.Uri.parse(m.url));
         break;
       case "command":
-        if (m.id?.startsWith("hyperexecute.")) await vscode.commands.executeCommand(m.id);
+        if (m.id?.startsWith("hyperexecute.") || m.id === "workbench.action.files.openFolder") await vscode.commands.executeCommand(m.id);
         break;
       case "ltAccountSave": {
         const username = String(m.username || "").trim();
@@ -531,6 +556,9 @@ class Studio {
       case "publishConfluence":
         await this.publishConfluence();
         break;
+      case "openAnnotated":
+        await openAnnotated(this.state.yaml, this.outputName());
+        break;
       case "undoChat":
         this.undo(m.id);
         break;
@@ -565,6 +593,14 @@ class Studio {
   restore(s) {
     const { repo, ...rest } = s;
     Object.assign(this.state, rest, { error: null });
+  }
+
+  // "Explain this YAML line by line": the Explain tab has every line; the chat says how to read it.
+  explainInChat() {
+    this.post({ type: "showPane", pane: "yaml", tab: "explain" });
+    const n = (this.state.explain || this.explainLines()).filter((l) => l.kind === "key" || l.kind === "item").length;
+    this.state.chat.push({ role: "assistant", text: `Every line of the YAML is explained in the **Explain** tab under the editor (${n} lines). Click a line there to jump to it in the YAML. **Open annotated copy** opens the YAML with each explanation as a comment above its line, a file you can keep or share. In any hyperexecute*.yaml file in the editor, hover over a line for the same explanation.`, backend: "Studio" });
+    this.push();
   }
 
   // What a chat turn changed: options with why each matters, the YAML diff and the validation after it.
@@ -659,6 +695,7 @@ class Studio {
     this.state.chat.push({ role: "user", text });
     this.push();
     if (/^(undo|revert|go back)\b/i.test(text.trim())) return this.undo();
+    if (/\b(line[- ]by[- ]line|each line|every line|annotat)/i.test(text)) return this.explainInChat();
     // No AI backend: the shared built-in assistant (same as the web version) handles the request.
     if ((await ai.detectBackend(this.context)).name === "rules") return this.builtInChat(c, text);
     this.busy("Thinking…");
@@ -1306,6 +1343,14 @@ class Studio {
 <link rel="stylesheet" href="${media("studio.css")}"><title>HyperExecute Studio</title></head>
 <body><div id="app"></div><script nonce="${nonce}" src="${media("studio.js")}"></script></body></html>`;
   }
+}
+
+// The YAML with each line's explanation as a comment above it, in a new editor tab (not saved anywhere).
+async function openAnnotated(yamlText, name) {
+  const c = await loadCore();
+  const content = `# ${name}, explained line by line by HyperExecute Studio. Comments only: it runs the same as the original.\n${c.annotateYaml(yamlText || "")}\n`;
+  const doc = await vscode.workspace.openTextDocument({ content, language: "yaml" });
+  await vscode.window.showTextDocument(doc, { preview: false });
 }
 
 function clean(o) {

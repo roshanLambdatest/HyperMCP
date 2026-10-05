@@ -11,5 +11,6 @@ export { collectEvidence, diagnose, applyDiagnosisFixes, logDigest, describeDiag
 export { cliDownloadUrl } from "./cli-url.js";
 export { generatePipeline, CI_SYSTEMS } from "../../src/pipelines.js";
 export { optionChanges, lineDiff } from "../../src/changes.js";
+export { explainYamlLines, annotateYaml } from "../../src/yaml-explain.js";
 export { vfsReset, vfsAdd, vfsFiles, vfsRead } from "./shims/fs.js";
 export { default as YAML } from "yaml";

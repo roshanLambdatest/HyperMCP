@@ -2,7 +2,7 @@
   "name": "hyperexecute-yaml-studio",
   "displayName": "HyperExecute Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {
@@ -55,6 +55,11 @@
         "command": "hyperexecute.validateActiveFile",
         "title": "Validate This HyperExecute YAML",
         "category": "HyperExecute"
+      },
+      {
+        "command": "hyperexecute.annotateActiveFile",
+        "title": "Explain This YAML Line by Line (annotated copy)",
+        "category": "HyperExecute"
       }
     ],
     "viewsContainers": {
@@ -88,6 +93,10 @@
         {
           "command": "hyperexecute.validateActiveFile",
           "when": "resourceLangId == yaml"
+        },
+        {
+          "command": "hyperexecute.annotateActiveFile",
+          "when": "resourceFilename =~ /hyperexecute.*\\.ya?ml$/"
         }
       ],
       "explorer/context": [

@@ -18,13 +18,22 @@
       <div class="repo">
         <select id="repoSel" aria-label="Repository"></select>
         <button class="icon-btn" id="reanalyze" title="Re-analyze repo">↻</button>
-      </div>
-      <div class="pills">
-        <button class="pill" id="backendPill" title="Choose AI backend"><span class="dot"></span><span></span></button>
-        <button class="pill" id="kbPill" title="Connect Confluence knowledge base"><span class="dot"></span><span></span></button>
-        <button class="pill" id="confPublish" title="Create a Confluence page documenting what was done for this repo">Add to Confluence</button>
+        <button class="sdot" id="backendPill"><span class="dot"></span><span>AI</span></button>
+        <button class="sdot" id="kbPill"><span class="dot"></span><span>KB</span></button>
+        <div class="menu-wrap">
+          <button class="icon-btn" id="moreBtn" title="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
+          <div class="menu" id="moreMenu" role="menu" hidden>
+            <button role="menuitem" data-act="backend">Choose AI backend…</button>
+            <button role="menuitem" data-act="kb">Connect Confluence…</button>
+            <button role="menuitem" data-act="publish">Add to Confluence (document this setup)</button>
+            <hr>
+            <button role="menuitem" data-act="clearChat">Clear chat</button>
+            <button role="menuitem" data-act="updates">Check for updates</button>
+          </div>
+        </div>
       </div>
     </header>
+    <div class="journey" id="journey"></div>
     <nav class="main-tabs" role="tablist">
       <button class="mtab" role="tab" data-pane="chat">Chat</button>
       <button class="mtab" role="tab" data-pane="yaml">YAML <span class="n" id="yamlBadge"></span></button>
@@ -42,23 +51,31 @@
       </div>
     </section>
     <section class="pane" data-pane="yaml">
-      <div class="yaml-h"><span id="yamlTitle">hyperexecute.yaml</span><span class="badge-v" id="verBadge"></span><span class="edited" id="edited"></span><span class="spacer"></span><span class="muted small" id="lines"></span></div>
+      <div class="optbar" id="opts"></div>
+      <div class="yaml-h"><span id="yamlTitle">hyperexecute.yaml</span><span class="badge-v" id="verBadge"></span><span class="edited" id="edited"></span><span class="spacer"></span><button class="link-btn" id="maskBtn" hidden></button><span class="muted small" id="lines"></span></div>
       <div id="genError"></div>
-      <div class="editor"><div class="gutter" id="gutter">1</div><textarea id="yaml" spellcheck="false" aria-label="Generated YAML"></textarea></div>
+      <div class="editor"><div class="gutter" id="gutter">1</div><div class="code-wrap"><pre class="hl" id="hl" aria-hidden="true"></pre><textarea id="yaml" spellcheck="false" aria-label="Generated YAML"></textarea></div></div>
       <div class="actions">
-        <button class="btn primary" id="save">Save to repo</button>
-        <button class="btn" id="openEd" title="Save and open in an editor tab">Open</button>
-        <button class="btn" id="dry">Dry-run</button>
-        <button class="btn" id="copy">Copy</button>
-        <button class="btn" id="optimize" title="Suggest speed, cost and reliability improvements">Optimize</button>
-        <button class="btn ghost" id="run" title="Save, then run the HyperExecute CLI in a terminal">▶ Run</button>
+        <button class="btn" id="save">Save to repo</button>
+        <button class="btn" id="run" title="Save, then run the job on HyperExecute and watch it in the Runs tab">▶ Run</button>
+        <span class="spacer"></span>
+        <div class="menu-wrap up">
+          <button class="btn ghost" id="yamlMore" title="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
+          <div class="menu" id="yamlMenu" role="menu" hidden>
+            <button role="menuitem" id="openEd">Open in editor</button>
+            <button role="menuitem" id="copy">Copy</button>
+            <button role="menuitem" id="dry">Dry-run discovery</button>
+            <button role="menuitem" id="optimize">Optimize</button>
+            <button role="menuitem" id="annotatedMenu">Open annotated copy</button>
+          </div>
+        </div>
       </div>
       <div class="checks">
         <div class="tabs" role="tablist">
-          <button class="tab" role="tab" data-tab="validation">Validation<span class="n" id="nVal"></span></button>
-          <button class="tab" role="tab" data-tab="notes">Notes<span class="n" id="nNotes"></span></button>
+          <button class="tab" role="tab" data-tab="validation">Checks<span class="n" id="nVal"></span></button>
           <button class="tab" role="tab" data-tab="discovery">Discovery</button>
           <button class="tab" role="tab" data-tab="optimize">Optimize<span class="n" id="nOpt"></span></button>
+          <button class="tab" role="tab" data-tab="explain" title="What every line of this YAML does">Explain</button>
         </div>
         <div class="panel" id="checks"></div>
       </div>
@@ -93,8 +110,6 @@
         </div></div>
       <div class="card"><div class="card-h">Credentials &amp; reporting<span class="spacer"></span><button class="icon-btn small" id="rescan">Rescan</button></div><div class="card-b" id="scan"></div></div>
       <div class="card"><div class="card-h">Detected stack<span class="spacer"></span><span id="fileState" class="muted small"></span></div><div class="card-b" id="stack"></div></div>
-      <div class="card"><div class="card-h">Options<span class="spacer"></span><button class="icon-btn small" id="resetOpts" title="Reset to detected defaults">Reset</button></div><div class="card-b"><div class="form" id="opts"></div></div></div>
-      <div class="card"><div class="card-h">Conversation</div><div class="card-b"><button class="btn ghost" id="clearChat">Clear chat</button></div></div>
     </section>
     <div id="busy"></div><div id="toast" role="status"></div>`;
 
@@ -113,12 +128,29 @@
   $("#reanalyze").onclick = () => send("reanalyze");
   $("#backendPill").onclick = () => send("command", { id: "hyperexecute.chooseBackend" });
   $("#kbPill").onclick = () => send("command", { id: "hyperexecute.setAtlassianToken" });
-  $("#confPublish").onclick = () => send("publishConfluence");
-  $("#resetOpts").onclick = () => send("resetOptions");
-  $("#clearChat").onclick = () => send("clearChat");
+
+  // small dropdown menus (header ⋯ and the YAML ⋯); one open at a time, closed by any outside click or Escape
+  const menus = [["#moreBtn", "#moreMenu"], ["#yamlMore", "#yamlMenu"]];
+  const closeMenus = () => menus.forEach(([b, m]) => { $(m).hidden = true; $(b).setAttribute("aria-expanded", "false"); });
+  for (const [b, m] of menus) {
+    $(b).onclick = (e) => { e.stopPropagation(); const open = $(m).hidden; closeMenus(); $(m).hidden = !open; $(b).setAttribute("aria-expanded", String(open)); if (open) $(m).querySelector("button")?.focus(); };
+    $(m).addEventListener("click", () => closeMenus());
+  }
+  document.addEventListener("click", closeMenus);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenus(); });
+  const ACTS = {
+    backend: () => send("command", { id: "hyperexecute.chooseBackend" }),
+    kb: () => send("command", { id: "hyperexecute.setAtlassianToken" }),
+    publish: () => send("publishConfluence"),
+    clearChat: () => send("clearChat"),
+    updates: () => send("command", { id: "hyperexecute.checkForUpdates" }),
+  };
+  $("#moreMenu").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => ACTS[b.dataset.act]()));
+
   $("#save").onclick = () => send("save");
   $("#openEd").onclick = () => send("openInEditor");
   $("#copy").onclick = () => send("copy");
+  $("#annotatedMenu").onclick = () => send("openAnnotated");
   $("#dry").onclick = () => { activeTab = "discovery"; send("dryRun"); renderChecks(); };
   showPane("chat");
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { activeTab = t.dataset.tab; renderChecks(); }));
@@ -146,20 +178,55 @@
     clearTimeout(editTimer);
     editTimer = setTimeout(() => send("yamlEdited", { yaml: ta.value }), 350);
   });
-  ta.addEventListener("scroll", () => ($("#gutter").scrollTop = ta.scrollTop));
+  ta.addEventListener("scroll", () => { $("#gutter").scrollTop = ta.scrollTop; $("#hl").scrollTop = ta.scrollTop; $("#hl").scrollLeft = ta.scrollLeft; });
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Tab") { e.preventDefault(); document.execCommand("insertText", false, "  "); }
   });
+  // the access key is shown as dots unless the user asks to see it (the text itself is unchanged)
+  let showKey = false;
+  $("#maskBtn").onclick = () => { showKey = !showKey; updateGutter(); };
   function updateGutter() {
     const n = ta.value.split("\n").length;
     $("#gutter").textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n");
     $("#lines").textContent = `${n} lines`;
+    const hasKey = /^\s*LT_ACCESS_KEY:\s*(?!\$\{\{)\S/m.test(ta.value);
+    $("#maskBtn").hidden = !hasKey;
+    $("#maskBtn").textContent = showKey ? "Hide key" : "Show key";
+    $("#hl").innerHTML = highlightYaml(ta.value, { maskKey: hasKey && !showKey });
+    $("#hl").scrollTop = ta.scrollTop;
+  }
+
+  // YAML colouring for the editor overlay (same rules as the web version's highlighter)
+  function highlightYaml(text, { maskKey } = {}) {
+    const h = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    const value = (v) => !v ? "" : h(v)
+      .replace(/(&lt;set [^&]*&gt;)/g, '<span class="t-todo">$1</span>')
+      .replace(/(\$\{\{[^}]*\}\})/g, '<span class="t-secret">$1</span>')
+      .replace(/(^|[\s"'=:])(\$[A-Za-z_][\w]*|\$\{[^}]+\})/g, '$1<span class="t-var">$2</span>')
+      .replace(/^(\s*)(true|false|null|yes|no)(\s*)$/i, '$1<span class="t-bool">$2</span>$3')
+      .replace(/^(\s*)(-?\d+(?:\.\d+)?)(\s*)$/, '$1<span class="t-num">$2</span>$3')
+      .replace(/^(\s*)(["'])(.*)\2(\s*)$/, '$1<span class="t-str">$2$3$2</span>$4');
+    const line = (l) => {
+      if (/^\s*#/.test(l) || /^---\s*$/.test(l)) return `<span class="t-comment">${h(l)}</span>`;
+      const k = l.match(/^(\s*LT_ACCESS_KEY:\s*)(\S.*)$/);
+      if (maskKey && k && !k[2].startsWith("${{")) return `${h(k[1]).replace("LT_ACCESS_KEY", '<span class="t-key">LT_ACCESS_KEY</span>')}<span class="t-secret">${"•".repeat(k[2].length)}</span>`;
+      const m = l.match(/^(\s*)(- )?([\w.$/-]+)(:)(\s|$)(.*)$/);
+      if (m) {
+        const [, ind, dash = "", key, colon, sp, rest] = m;
+        const hash = rest.match(/^(.*?)(\s+#.*)$/);
+        return `${ind}${dash ? '<span class="t-dash">- </span>' : ""}<span class="t-key">${h(key)}</span><span class="t-punct">${colon}</span>${sp}${value(hash ? hash[1] : rest)}${hash ? `<span class="t-comment">${h(hash[2])}</span>` : ""}`;
+      }
+      const li = l.match(/^(\s*)(- )(.*)$/);
+      return li ? `${li[1]}<span class="t-dash">- </span>${value(li[3])}` : value(l);
+    };
+    return text.split("\n").map(line).join("\n") + "\n";
   }
 
   // ---------- rendering ----------
   function render() {
     if (!S) return;
     renderTop();
+    renderJourney();
     renderStack();
     renderOptions();
     renderChat();
@@ -173,10 +240,50 @@
     const m = S.meta || {};
     const bp = $("#backendPill");
     bp.children[0].className = "dot " + (m.backendId === "rules" ? "off" : "on");
-    bp.children[1].textContent = `AI: ${m.backend || "…"}`;
+    bp.title = `AI: ${m.backend || "…"}${m.backendId === "rules" ? " (no AI model; click to choose one)" : ""}. Click to change.`;
     const kp = $("#kbPill");
     kp.children[0].className = "dot " + (m.confluence ? "on" : "off");
-    kp.children[1].textContent = m.confluence ? `Confluence: ${m.confluenceSpace}` : "Connect Confluence";
+    kp.title = m.confluence ? `Knowledge base: Confluence ${m.confluenceSpace} connected` : "Knowledge base: bundled notes only. Click to connect Confluence.";
+    $('#moreMenu [data-act="kb"]').textContent = m.confluence ? `Confluence: ${m.confluenceSpace} (change…)` : "Connect Confluence…";
+    $('#moreMenu [data-act="backend"]').textContent = `AI: ${m.backend || "…"} (change…)`;
+  }
+
+  // Where the user is: Analyzed → Valid → Saved → Ran → Passed, and the one thing to do next.
+  function journey() {
+    const v = S.validation, r = S.run, m = S.meta || {};
+    const errs = v?.errors?.length || 0;
+    const steps = [
+      ["Analyzed", !!S.profile],
+      ["Valid", !!v && !errs],
+      ["Saved", S.onDisk === "same"],
+      ["Ran", !!r?.history?.length],
+      ["Passed", r?.status === "passed"],
+    ];
+    let next;
+    if (!S.repos?.length) next = { label: "Open a folder", hint: "Open your test repo in VS Code", act: () => send("command", { id: "workbench.action.files.openFolder" }) };
+    else if (!S.profile) next = { label: "Analyze", hint: "Analyze this repo", act: () => send("reanalyze") };
+    else if (errs) next = { label: `Fix ${errs} error${errs > 1 ? "s" : ""}`, hint: "The YAML has problems", act: () => { showPane("yaml"); activeTab = "validation"; renderChecks(); } };
+    else if (S.onDisk !== "same") next = { label: "Save to repo", hint: S.onDisk === "different" ? "The repo's file differs from this YAML" : "Not saved in the repo yet", act: () => send("save") };
+    else if (!m.ltReady) next = { label: "Add account", hint: "Add your LambdaTest account to run", act: () => showPane("setup") };
+    else if (r?.status === "running") next = { label: "Watch", hint: `Run ${r.attempt} in progress`, act: () => showPane("runs") };
+    else if (!r?.history?.length) next = { label: "▶ Run", hint: "Ready to run on HyperExecute", act: () => { showPane("runs"); $("#runStart").click(); } };
+    else if (r.status !== "passed") next = { label: "See why", hint: "The last run didn't pass", act: () => showPane("runs") };
+    else next = { label: "Set up CI", hint: "Passed. Run it from your CI next?", act: () => { showPane("chat"); send("chat", { text: "Create a CI pipeline for this YAML" }); } };
+    return { steps, next };
+  }
+  let nextAct = null;
+  function renderJourney() {
+    const { steps, next } = journey();
+    const firstOpen = steps.findIndex(([, done]) => !done);
+    $("#journey").innerHTML =
+      `<ol class="steps">${steps.map(([label, done], i) => `<li class="${done ? "done" : i === firstOpen ? "now" : ""}" title="${label}${done ? " ✓" : ""}"><span class="mark">${done ? "✓" : i + 1}</span><span class="lbl">${label}</span></li>`).join("")}</ol>` +
+      `<div class="next"><span class="hint">${esc(next.hint)}</span><button class="btn primary small" id="nextBtn">${esc(next.label)}</button></div>`;
+    nextAct = next.act;
+    $("#nextBtn").onclick = () => nextAct?.();
+    // the action bar follows the same order: the next step is the primary button
+    const saveNext = S.onDisk !== "same";
+    $("#save").className = "btn" + (saveNext ? " primary" : "");
+    $("#run").className = "btn" + (!saveNext ? " primary" : "");
   }
 
   function renderStackLine() {
@@ -230,25 +337,36 @@
     </div>`;
   }
 
+  let moreOpen = false;
   function renderOptions() {
     const el = $("#opts");
     const o = S.options || {};
     const r = S.result || {};
     const splits = r.supportedSplits || ["class"];
+    if (!S.profile) return (el.innerHTML = "");
+    // keep focus and a half-typed number while the YAML regenerates
+    const focused = document.activeElement?.id;
     const sel = (id, label, opts, val) =>
-      `<div class="field"><label for="${id}">${label}</label><select id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(val) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>`;
-    const num = (id, label, val, min, max) => `<div class="field"><label for="${id}">${label}</label><input type="number" id="${id}" value="${esc(val)}" min="${min}" max="${max}"></div>`;
+      `<label class="f" for="${id}"><span>${label}</span><select id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(val) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`;
+    const num = (id, label, val, min, max) => `<label class="f" for="${id}"><span>${label}</span><input type="number" id="${id}" value="${esc(val)}" min="${min}" max="${max}"></label>`;
     const retries = o.retryOnFailure === false ? 0 : o.maxRetries ?? 1;
+    // the four everyday options always show; the rest sit behind "More"
     el.innerHTML =
-      sel("o-ver", "YAML version", [["auto", `Auto (${r.yamlVersion ? "v" + r.yamlVersion : "…"})`], ["0.2", "v0.2 · native runner"], ["0.1", "v0.1 · raw discovery"]], o.yamlVersion || "auto") +
-      sel("o-os", "Target OS", [["linux", "Linux"], ["win", "Windows"], ["win11", "Windows 11"], ["mac", "macOS"], ["mac13", "macOS 13"]], o.runson || "linux") +
-      sel("o-mode", "Mode", [["autosplit", "Autosplit"], ["matrix", "Matrix"]], o.executionMode || r.executionMode || "autosplit") +
+      `<div class="optrow">` +
+      sel("o-os", "OS", [["linux", "Linux"], ["win", "Windows"], ["win11", "Win 11"], ["mac", "macOS"], ["mac13", "macOS 13"]], o.runson || "linux") +
+      num("o-conc", "VMs", o.concurrency ?? 5, 1, 500) +
       sel("o-split", "Split by", splits.map((s) => [s, s[0].toUpperCase() + s.slice(1)]), o.splitBy || r.splitBy || splits[0]) +
-      num("o-conc", "Concurrency (VMs)", o.concurrency ?? 5, 1, 500) +
       num("o-retry", "Retries", retries, 0, 5) +
+      `</div><div class="optline"><label class="toggle tight"><input type="checkbox" id="o-tunnel" ${o.tunnel ? "checked" : ""}> Tunnel</label><span class="spacer"></span><button class="link-btn" id="moreOptsBtn" aria-expanded="${moreOpen}">${moreOpen ? "Fewer options ▴" : "More options ▾"}</button></div>` +
+      `<div class="more-opts"${moreOpen ? "" : " hidden"}><div class="optrow">` +
+      sel("o-ver", "YAML", [["auto", `Auto (${r.yamlVersion ? "v" + r.yamlVersion : "…"})`], ["0.2", "v0.2 native"], ["0.1", "v0.1 raw"]], o.yamlVersion || "auto") +
+      sel("o-mode", "Mode", [["autosplit", "Autosplit"], ["matrix", "Matrix"]], o.executionMode || r.executionMode || "autosplit") +
       num("o-timeout", "Timeout (min)", o.globalTimeout ?? 90, 1, 150) +
-      (S.profile?.mavenProfiles?.length ? sel("o-mvnp", "Maven profile", [["", "None (default)"], ...S.profile.mavenProfiles.map((m) => [m.id, m.id + (m.activeByDefault ? " (active by default)" : "")])], o.mavenProfile || "") : "") +
-      `<label class="toggle"><input type="checkbox" id="o-tunnel" ${o.tunnel ? "checked" : ""}> Tunnel</label>`;
+      (S.profile?.mavenProfiles?.length ? sel("o-mvnp", "Maven profile", [["", "None"], ...S.profile.mavenProfiles.map((m) => [m.id, m.id + (m.activeByDefault ? " (default)" : "")])], o.mavenProfile || "") : "") +
+      `</div><button class="link-btn" id="resetOpts" title="Back to the detected defaults">Reset to detected defaults</button></div>`;
+    $("#moreOptsBtn").onclick = () => { moreOpen = !moreOpen; renderOptions(); };
+    $("#resetOpts").onclick = () => send("resetOptions");
+    if (focused && $("#" + focused)) $("#" + focused).focus();
     const push = (options) => send("setOptions", { options });
     $("#o-ver").onchange = (e) => push({ yamlVersion: e.target.value === "auto" ? null : e.target.value });
     $("#o-os").onchange = (e) => push({ runson: e.target.value });
@@ -275,7 +393,7 @@
     s.push("Optimize this YAML");
     if (S.scan?.credentials?.length || S.scan?.reporting?.length) s.unshift("What reports to the customer's side?");
     s.push("Fail fast after 3 failures");
-    s.push("Explain this YAML");
+    s.push("Explain this YAML line by line");
     return s.slice(0, 6);
   }
 
@@ -354,20 +472,21 @@
     const yb = $("#yamlBadge");
     yb.textContent = v ? (v.errors.length ? `${v.errors.length}✕` : "✓") : "";
     yb.className = "n " + (v ? (v.errors.length ? "bad" : "good") : "");
-    $("#nNotes").textContent = notes.length ? `(${notes.length})` : "";
     const el = $("#checks");
     const row = (cls, ic, text) => `<div class="check ${cls}"><span class="ic">${ic}</span><span>${esc(text)}</span></div>`;
     if (activeTab === "validation") {
       if (!v) return (el.innerHTML = `<div class="muted small">No YAML yet.</div>`);
+      // problems first, then the generator's notes about this YAML
       el.innerHTML =
         (v.errors.length || v.warnings.length ? "" : row("ok", "✓", "Valid — no issues found.")) +
         v.errors.map((e) => row("err", "✕", e)).join("") +
         v.warnings.map((e) => row("warn", "!", e)).join("") +
-        (v.info || []).map((e) => row("info", "i", e)).join("");
-    } else if (activeTab === "notes") {
-      el.innerHTML = notes.length ? notes.map((n) => row("info", "i", n)).join("") : `<div class="muted small">No notes.</div>`;
+        (v.info || []).map((e) => row("info", "i", e)).join("") +
+        (notes.length ? `<div class="sub-h">About this YAML</div>${notes.map((n) => row("info", "i", n)).join("")}` : "");
     } else if (activeTab === "optimize") {
       renderOptimize(el);
+    } else if (activeTab === "explain") {
+      renderExplain(el);
     } else {
       const d = dryRun;
       if (!d) el.innerHTML = `<div class="muted small">Click “Dry-run” to run the discovery command locally and preview the tasks HyperExecute will create.</div>`;
@@ -382,16 +501,34 @@
     }
   }
 
+  // every line of the YAML with what it does; click a line to select it in the editor
+  function renderExplain(el) {
+    const lines = (S?.explain || []).filter((l) => l.kind !== "blank" && l.kind !== "continued");
+    if (!lines.length) return (el.innerHTML = `<div class="muted small">No YAML yet.</div>`);
+    el.innerHTML =
+      `<div class="explain-h"><span class="muted small">What each line does on HyperExecute. Click a line to find it in the YAML.</span><button class="btn small" id="annotated" title="Open the YAML with each explanation as a comment above its line">Open annotated copy</button></div>` +
+      `<div class="explain">${lines.map((l) => `<div class="ex ${l.kind}" data-line="${l.n}"><span class="ln">${l.n}</span><code>${esc(l.text.trim())}</code><span class="what">${md(l.what)}</span></div>`).join("")}</div>`;
+    $("#annotated").onclick = () => send("openAnnotated");
+    el.querySelectorAll(".ex[data-line]").forEach((r) => (r.onclick = () => goToLine(+r.dataset.line)));
+  }
+  function goToLine(n) {
+    const lines = ta.value.split("\n");
+    const start = lines.slice(0, n - 1).reduce((a, l) => a + l.length + 1, 0);
+    ta.focus();
+    ta.setSelectionRange(start, start + (lines[n - 1] || "").length);
+    ta.scrollTop = Math.max(0, (n - 4) * (parseFloat(getComputedStyle(ta).lineHeight) || 18));
+  }
+
   let toastTimer;
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (m.type === "state") { S = m.state; render(); }
-    else if (m.type === "showPane") showPane(m.pane);
+    else if (m.type === "showPane") { showPane(m.pane); if (m.tab) { activeTab = m.tab; renderChecks(); } }
     else if (m.type === "busy") {
       busyLabel = m.label;
       $("#busy").classList.toggle("on", !!m.label);
       if (S) renderChat();
-    } else if (m.type === "validation") { S.validation = m.validation; S.dirty = m.dirty; renderChecks(); $("#edited").textContent = S.dirty ? "● edited" : ""; }
+    } else if (m.type === "validation") { S.validation = m.validation; S.dirty = m.dirty; if (m.explain) S.explain = m.explain; renderChecks(); $("#edited").textContent = S.dirty ? "● edited" : ""; }
     else if (m.type === "dryRun") { dryRun = m.result; activeTab = "discovery"; renderChecks(); }
     else if (m.type === "toast") {
       const t = $("#toast");
@@ -504,7 +641,11 @@
   $("#optimize").onclick = () => { activeTab = "optimize"; optimizeResult = { loading: true }; renderChecks(); send("optimize"); };
   function renderOptimize(el) {
     const o = optimizeResult;
-    if (!o) return (el.innerHTML = `<div class="muted small">Click “Optimize” to check this YAML for speed, cost and reliability improvements.</div>`);
+    if (!o) {
+      el.innerHTML = `<div class="muted small">Checks this YAML for speed, cost and reliability improvements.</div><div class="row"><button class="btn small" id="optRun">Find improvements</button></div>`;
+      $("#optRun").onclick = () => $("#optimize").click();
+      return;
+    }
     if (o.loading) return (el.innerHTML = `<div class="muted small">Analyzing…</div>`);
     if (o.error) return (el.innerHTML = `<div class="check err"><span class="ic">✕</span><span>${esc(o.error)}</span></div>`);
     if (!o.suggestions.length) return (el.innerHTML = `<div class="check ok"><span class="ic">✓</span><span>Nothing to optimize — this YAML already follows the recommendations.</span></div>`);

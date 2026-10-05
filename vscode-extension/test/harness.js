@@ -5,6 +5,8 @@ const fs = require("fs");
 const os = require("os");
 
 const posted = [];
+const opened = []; // untitled documents the extension opened ({ content, language })
+let hover; // the registered hover provider
 const settings = { aiBackend: process.env.BACKEND || "rules", confluenceSpace: "HYP", outputFileName: "hyperexecute.yaml" };
 const secrets = new Map(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : []);
 if (process.env.ATL_EMAIL) settings.atlassianEmail = process.env.ATL_EMAIL;
@@ -26,7 +28,7 @@ const vscodeStub = {
     workspaceFolders: [{ name: path.basename(tmpRepo), uri: { fsPath: tmpRepo } }],
     getConfiguration: () => ({ get: (k, d) => settings[k] ?? d, update: async (k, v) => (settings[k] = v) }),
     getWorkspaceFolder: () => null,
-    openTextDocument: async (uri) => ({ uri, getText: () => fs.readFileSync(uri.fsPath, "utf8"), positionAt: (n) => n, save: async () => true }),
+    openTextDocument: async (uri) => (uri?.content !== undefined ? (opened.push(uri), { uri: null, getText: () => uri.content }) : { uri, getText: () => fs.readFileSync(uri.fsPath, "utf8"), positionAt: (n) => n, save: async () => true }),
     applyEdit: async (edit) => { for (const o of edit.ops) fs.writeFileSync(o.uri.fsPath, o.text); return true; },
     onDidChangeConfiguration: () => ({ dispose() {} }),
   },
@@ -45,6 +47,9 @@ const vscodeStub = {
   commands: { registerCommand: (id, f) => { commandHandlers[id] = f; return { dispose() {} }; }, executeCommand: async (id, ...a) => { executed.push([id, ...a]); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
   lm: { selectChatModels: async () => [] },
+  languages: { registerHoverProvider: (sel, provider) => { hover = provider; return { dispose() {} }; } },
+  Hover: class { constructor(c) { this.contents = c; } },
+  MarkdownString: class { constructor(v) { this.value = v; } },
   WorkspaceEdit: class { constructor() { this.ops = []; } replace(uri, range, text) { this.ops.push({ uri, text }); } },
   Range: class { constructor(a, b) { this.a = a; this.b = b; } },
   Position: class { constructor(l, c) { this.l = l; this.c = c; } },
@@ -133,6 +138,18 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
 
   await send({ type: "save" });
   check("saved to repo", fs.existsSync(path.join(tmpRepo, "hyperexecute.yaml")));
+  s = lastState();
+  // the YAML still has the bogusKey line added above: it must be the only one flagged as unknown
+  const unexplained = (s.explain || []).filter((l) => (l.kind === "key" || l.kind === "item") && (!l.what || /explainer knows/.test(l.what)));
+  check("explain: every line is explained; only the made-up key is flagged", s.explain?.length > 20 && unexplained.length === 1 && unexplained[0].text.startsWith("bogusKey"), JSON.stringify(unexplained));
+  await send({ type: "chat", text: "Explain this YAML line by line" });
+  check("explain: chat opens the Explain tab", posted.some((m) => m.type === "showPane" && m.tab === "explain") && /Explain\*\* tab/.test(lastState().chat.at(-1).text));
+  await send({ type: "openAnnotated" });
+  const ann = opened.at(-1)?.content || "";
+  check("explain: annotated copy has a comment above each line and is the same YAML", /# The operating system of every VM/.test(ann) && JSON.stringify(require("yaml").parse(ann.replace(/\$\{\{[^}]*\}\}/g, "x"))) === JSON.stringify(require("yaml").parse(s.yaml.replace(/\$\{\{[^}]*\}\}/g, "x"))), ann.slice(0, 400));
+  const runsonLine = s.yaml.split("\n").findIndex((l) => l.startsWith("runson:"));
+  const h = await hover.provideHover({ getText: () => s.yaml }, { line: runsonLine });
+  check("explain: hovering a line in a hyperexecute.yaml explains it", /runson/.test(h?.contents?.value) && /operating system/.test(h?.contents?.value), JSON.stringify(h));
   check("timeline: the save shows in the chat, undo doesn't add a line", lastState().chat.some((m) => m.role === "event" && m.text === "Saved the YAML") && !lastState().chat.some((m) => m.role === "event" && /Undid/.test(m.text)));
   if (process.env.FIXTURE === "creds") {
     s = lastState();

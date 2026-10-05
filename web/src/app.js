@@ -640,7 +640,7 @@ function workspace() {
     S.dirty = S.yaml !== S.generated;
     paintEditor(false);
     clearTimeout(t);
-    t = setTimeout(() => { S.opt = null; validate(); renderMeta(); renderTabs(); if (S.tab === "checks") renderPanel(); }, 300);
+    t = setTimeout(() => { S.opt = null; validate(); renderMeta(); renderTabs(); if (S.tab === "checks" || S.tab === "explain") renderPanel(); }, 300);
   });
   ta.addEventListener("scroll", () => { $("#hl").scrollTop = ta.scrollTop; $("#hl").scrollLeft = ta.scrollLeft; $("#gutter").scrollTop = ta.scrollTop; });
   ta.addEventListener("keydown", (e) => { if (e.key === "Tab") { e.preventDefault(); ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end"); ta.dispatchEvent(new Event("input")); } });
@@ -729,7 +729,7 @@ function renderOptions() {
 }
 
 // ---------- drawer tabs ----------
-const TABS = [["checks", "Checks", "list"], ["run", "Run", "play"], ["optimize", "Optimize", "wand"], ["security", "Security", "shield"], ["diagnose", "Diagnose", "pulse"], ["grid", "Grid", "grid"]];
+const TABS = [["checks", "Checks", "list"], ["run", "Run", "play"], ["optimize", "Optimize", "wand"], ["security", "Security", "shield"], ["diagnose", "Diagnose", "pulse"], ["grid", "Grid", "grid"], ["explain", "Explain", "info"]];
 function openTab(id) {
   S.tab = id;
   renderTabs();
@@ -749,7 +749,28 @@ const item = (cls, ic, text) => `<div class="item ${cls}">${icon[ic]}<span>${inl
 function renderPanel() {
   const el = $("#panel");
   if (!el) return;
-  ({ checks: renderChecks, run: renderRun, optimize: renderOptimize, security: renderSecurity, diagnose: renderDiagnose, grid: renderGrid })[S.tab](el);
+  ({ checks: renderChecks, run: renderRun, optimize: renderOptimize, security: renderSecurity, diagnose: renderDiagnose, grid: renderGrid, explain: renderExplain })[S.tab](el);
+}
+
+// every line of the YAML with what it does on HyperExecute; click a line to find it in the editor
+function renderExplain(el) {
+  const lines = core.explainYamlLines(S.yaml).filter((l) => l.kind !== "blank" && l.kind !== "continued");
+  el.innerHTML =
+    `<div class="explain-h"><p class="muted small">What each line does on HyperExecute, and why its value is there. Click a line to find it in the YAML.</p><button class="btn sm" id="annDl">${icon.download}Download explained YAML</button></div>` +
+    `<div class="explain">${lines.map((l) => `<div class="ex ${l.kind}" data-line="${l.n}"><span class="ln">${l.n}</span><code>${esc(l.text.trim())}</code><span class="what">${inline(visitor(l.what))}</span></div>`).join("")}</div>`;
+  $("#annDl").onclick = () => download((S.fileName || "hyperexecute.yaml").replace(/\.ya?ml$/, "") + ".explained.yaml", `# ${S.fileName || "hyperexecute.yaml"}, explained line by line by HyperExecute Studio. Comments only: it runs the same as the original.\n${core.annotateYaml(S.yaml)}\n`, "text/yaml");
+  $$(".ex[data-line]", el).forEach((r) => (r.onclick = () => goToLine(+r.dataset.line)));
+}
+function goToLine(n) {
+  const ta = $("#yaml");
+  if (!ta) return;
+  if (window.innerWidth <= 960) setView("yaml");
+  const lines = ta.value.split("\n");
+  const start = lines.slice(0, n - 1).reduce((a, l) => a + l.length + 1, 0);
+  ta.focus();
+  ta.setSelectionRange(start, start + (lines[n - 1] || "").length);
+  ta.scrollTop = Math.max(0, (n - 4) * (parseFloat(getComputedStyle(ta).lineHeight) || 20));
+  ta.dispatchEvent(new Event("scroll"));
 }
 
 function renderChecks(el) {

@@ -317,3 +317,14 @@ dialog::backdrop { background: rgba(12, 12, 14, 0.45); }
   .optbar .reset { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Explain tab: every line of the YAML with what it does */
+.explain-h { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+.explain-h p { flex: 1; margin: 0; }
+.explain { display: flex; flex-direction: column; }
+.ex { display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 13px; }
+.ex:hover { background: var(--panel-2); }
+.ex .ln { grid-row: span 2; color: var(--ink-3); text-align: right; font: 12px/1.6 var(--mono); }
+.ex code { font: 12.5px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.ex .what { color: var(--ink-2); }
+.ex.comment code, .ex.doc code { color: var(--ink-3); }

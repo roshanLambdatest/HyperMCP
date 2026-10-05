@@ -1,6 +1,6 @@
 {
   "name": "hyperexecute-studio-mcp",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "HyperExecute Studio MCP server: analyzes a test-automation repo, builds and validates HyperExecute YAML, runs jobs and diagnoses failures",
   "type": "module",
   "main": "src/index.js",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node test/smoke.js",
+    "test": "node test/smoke.js && node test/explain.js",
     "accuracy": "node test/accuracy/run.js",
     "feedback": "node scripts/feedback-report.js"
   },

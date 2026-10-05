@@ -134,7 +134,8 @@ export function respond(text, ctx) {
   if (/\b(optimi[sz]e|faster|cheaper|speed ?up|save (time|money|cost))\b/.test(low)) return { optimize: true };
   const ci = /github\s*actions?|\bgithub\b.*\b(ci|workflow|pipeline)/.test(low) ? "github" : /\bgitlab\b/.test(low) ? "gitlab" : /\bjenkins(file)?\b/.test(low) ? "jenkins" : /\bazure\b/.test(low) ? "azure" : null;
   if (ci || /\b(ci|pipeline|workflow)\b.*\b(file|yaml|yml|set ?up|run|every push)|\brun (it |this )?(from|in|on) (my )?ci\b|\b(ci|pipeline)\b\s*\??$/.test(low)) return { pipeline: ci || "ask" };
-  if (/\b(explain|walk me through|what does (this|the|my) yaml|describe (this|the|my) yaml)\b/.test(low)) return { reply: explainYaml(ctx), chips: [{ label: "Is it valid?", send: "Is it valid?" }, { label: "How do I run it?", send: "How do I run it?" }] };
+  if (/\b(line[- ]by[- ]line|each line|every line|annotat)/.test(low)) return { reply: "Every line of the YAML is explained in the **Explain** tab: what it does on HyperExecute and why its value is there. You can also download the YAML with each explanation as a comment above its line.", tab: "explain" };
+  if (/\b(explain|walk me through|what does (this|the|my) yaml|describe (this|the|my) yaml)\b/.test(low)) return { reply: explainYaml(ctx), chips: [{ label: "Explain line by line", send: "Explain this YAML line by line" }, { label: "Is it valid?", send: "Is it valid?" }, { label: "How do I run it?", send: "How do I run it?" }] };
   if (/\b(valid|errors?|wrong|issues?|problems?|warnings?)\b/.test(low) && ask(t)) {
     const v = ctx.validation;
     if (!v) return { reply: "There's no YAML yet." };

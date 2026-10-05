@@ -147,6 +147,12 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   check("chat: browsers → matrix axis in v0.1", /browser:\s*\n\s*- chrome\s*\n\s*- firefox/.test(y) && /version: 0.1/.test(y), y.slice(0, 900));
   r = await ask("Explain this YAML");
   check("chat: explain", /YAML v0.1/.test(r) && /Matrix/.test(r), r);
+  r = await ask("Explain this YAML line by line");
+  const ex = await page.$$eval("#panel .ex", (rows) => rows.map((x) => x.innerText));
+  check("explain: line by line opens the Explain tab, every line explained", /Explain/.test(await page.$eval("#tabs .tab.on", (e) => e.innerText)) && ex.length > 20 && ex.some((t) => /runson/.test(t) && /operating system/.test(t)) && !ex.some((t) => /explainer knows/.test(t)), ex.slice(0, 5).join("\n"));
+  await page.evaluate(() => [...document.querySelectorAll("#panel .ex")].find((x) => /concurrency:/.test(x.innerText)).click());
+  const sel = await page.$eval("#yaml", (t) => t.value.slice(t.selectionStart, t.selectionEnd));
+  check("explain: clicking a line selects it in the editor", /^concurrency:/.test(sel), sel);
   r = await ask("what is a tunnel?");
   check("chat: FAQ answer", /tunnel: true/.test(r), r);
   r = await ask("Optimize it");

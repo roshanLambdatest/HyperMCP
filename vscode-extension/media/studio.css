@@ -41,10 +41,36 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #app { display: flex; flex-direction: column; height: 100vh; }
 
 /* header */
-.top { padding: 8px 10px 6px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
+.top { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .repo { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .repo select { flex: 1; min-width: 0; }
-.pills { display: flex; gap: 6px; flex-wrap: wrap; }
+/* compact status: a coloured dot + short label, details in the tooltip */
+.sdot { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; background: transparent; cursor: pointer; font-size: 10.5px; color: var(--muted); }
+.sdot:hover { border-color: var(--focus); color: var(--fg); }
+/* dropdown menus */
+.menu-wrap { position: relative; }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 220px; padding: 4px; display: flex; flex-direction: column;
+  background: var(--vscode-menu-background, var(--card)); color: var(--vscode-menu-foreground, var(--fg)); border: 1px solid var(--vscode-menu-border, var(--border)); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3); }
+.menu[hidden] { display: none; }
+.menu-wrap.up .menu { top: auto; bottom: calc(100% + 4px); }
+.menu button { text-align: left; background: transparent; border: none; padding: 5px 9px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.menu button:hover, .menu button:focus-visible { background: var(--vscode-menu-selectionBackground, var(--accent)); color: var(--vscode-menu-selectionForeground, var(--accent-fg)); outline: none; }
+.menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 2px; width: auto; }
+.link-btn { background: none; border: none; padding: 0; color: var(--link); cursor: pointer; font-size: 11px; }
+.link-btn:hover { text-decoration: underline; }
+/* progress strip: where the user is, and the one next step */
+.journey { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.journey:empty { display: none; }
+.steps { display: flex; gap: 2px; margin: 0; padding: 0; list-style: none; flex: 1 1 auto; min-width: 0; }
+.steps li { display: flex; align-items: center; gap: 3px; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.steps li + li::before { content: ""; width: 8px; height: 1px; background: var(--border); margin: 0 2px; }
+.steps .mark { width: 14px; height: 14px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 9px; border: 1px solid var(--border); }
+.steps li.done { color: var(--fg); }
+.steps li.done .mark { background: var(--ok); border-color: var(--ok); color: var(--vscode-editor-background, #000); }
+.steps li.now { color: var(--fg); font-weight: 600; }
+.steps li.now .mark { border-color: var(--focus); color: var(--focus); }
+.next { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
+.next .hint { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; max-width: 100%;
   border: 1px solid var(--border); background: transparent; cursor: pointer; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -141,11 +167,36 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
   padding: 6px 6px 6px 8px; text-align: right; color: var(--muted); font-family: var(--mono); font-size: var(--mono-size);
   line-height: 1.5; user-select: none; overflow: hidden; white-space: pre; opacity: 0.6; min-width: 30px;
 }
-.editor textarea {
-  flex: 1; min-width: 0; border: none; resize: none; outline: none; background: transparent; color: var(--fg);
-  font-family: var(--mono); font-size: var(--mono-size); line-height: 1.5; padding: 6px 8px; white-space: pre; overflow: auto; tab-size: 2;
+/* editor: a transparent textarea over a highlighted copy of the same text */
+.code-wrap { position: relative; flex: 1; min-width: 0; }
+.code-wrap .hl, .code-wrap textarea {
+  position: absolute; inset: 0; margin: 0; border: none; padding: 6px 8px; font-family: var(--mono); font-size: var(--mono-size);
+  line-height: 1.5; white-space: pre; tab-size: 2; overflow: auto; letter-spacing: normal;
 }
-.actions { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 10px; }
+.code-wrap .hl { pointer-events: none; overflow: hidden; color: var(--fg); background: transparent; }
+.code-wrap textarea { resize: none; outline: none; background: transparent; color: transparent; caret-color: var(--fg); z-index: 1; }
+.code-wrap textarea::selection { background: var(--vscode-editor-selectionBackground, rgba(38, 79, 120, 0.8)); }
+.t-key { color: var(--vscode-debugTokenExpression-name, #9cdcfe); }
+.t-str { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+.t-num, .t-bool { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+.t-comment, .t-dash, .t-punct { color: var(--muted); }
+.t-comment { font-style: italic; }
+.t-var { color: var(--vscode-debugTokenExpression-boolean, #4fc1ff); }
+.t-secret { color: var(--warn); }
+.t-todo { color: var(--err); text-decoration: underline dotted; }
+.actions { display: flex; align-items: center; gap: 5px; padding: 6px 10px; }
+/* options bar above the YAML */
+.optbar { padding: 6px 10px 4px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.optbar:empty { display: none; }
+.optrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 6px; }
+.optbar .f { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.optbar .f span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.optbar select, .optbar input[type="number"] { width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; }
+.optline { display: flex; align-items: center; gap: 8px; }
+.more-opts { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding-bottom: 2px; }
+.more-opts .optrow { width: 100%; }
+.more-opts[hidden] { display: none; }
+.sub-h { margin: 8px 0 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
 .error-banner { margin: 0 10px 6px; padding: 5px 8px; border-left: 3px solid var(--err); background: rgba(241, 76, 76, 0.08); font-size: 12px; }
 .checks { display: flex; flex-direction: column; max-height: 38%; min-height: 110px; border-top: 1px solid var(--border); }
 .tabs { display: flex; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--border); }
@@ -310,3 +361,25 @@ pre.code {
 .change { padding: 6px 0; border-top: 1px solid var(--border); }
 .change:first-child { border-top: 0; padding-top: 0; }
 .change .card-h { padding: 4px 0 0; border: 0; min-height: 0; }
+
+/* Explain tab: every line of the YAML with what it does */
+.explain-h { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.explain-h .muted { flex: 1; }
+.explain { display: flex; flex-direction: column; }
+.ex { display: grid; grid-template-columns: 26px minmax(0, 1fr); column-gap: 6px; padding: 4px 2px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 11.5px; }
+.ex:hover { background: rgba(127, 127, 127, 0.08); }
+.ex .ln { grid-row: span 2; color: var(--muted); text-align: right; font-family: var(--mono); }
+.ex code { font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ex .what { color: var(--muted); }
+.ex.comment code, .ex.doc code { color: var(--muted); }
+
+/* narrow sidebars: steps show only their marks (the current one keeps its label); options in two columns */
+@media (max-width: 340px) {
+  .steps li:not(.now) .lbl { display: none; }
+  .optrow { grid-template-columns: 1fr 1fr; }
+}
+/* light themes: readable fallbacks if a theme leaves the debug token colours unset */
+body.vscode-light .t-key { color: var(--vscode-debugTokenExpression-name, #9b46b0); }
+body.vscode-light .t-str { color: var(--vscode-debugTokenExpression-string, #a31515); }
+body.vscode-light .t-num, body.vscode-light .t-bool { color: var(--vscode-debugTokenExpression-number, #098658); }
+body.vscode-light .t-var { color: var(--vscode-debugTokenExpression-boolean, #0000ff); }
