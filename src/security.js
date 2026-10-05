@@ -10,8 +10,26 @@ const IGNORED = new Set(["node_modules", ".git", "target", "build", "dist", "out
 const TEXT_EXT = /\.(java|kt|groovy|py|robot|[cm]?[jt]sx?|cs|rb|php|properties|ya?ml|json|env|conf|ini|cfg|toml|xml|feature|runsettings|config|txt)$|(^|\/)\.env[\w.-]*$/;
 const CODE_LANG = { java: "java", kt: "java", groovy: "java", py: "python", js: "js", mjs: "js", cjs: "js", ts: "js", jsx: "js", tsx: "js", cs: "csharp" };
 
+// .hyperexecute/scan-ignore: paths this repo keeps out of the credential and reporting scan, one per line
+// (gitignore-style: "test/fixtures/", "**/*.sample.json", "smoke.js"; # comments). For a repo's own fake
+// test data; real customer code should be fixed, not ignored.
+export const SCAN_IGNORE_FILE = ".hyperexecute/scan-ignore";
+export function scanIgnore(root) {
+  let lines = [];
+  try { lines = fs.readFileSync(path.join(root, SCAN_IGNORE_FILE), "utf8").split(/\r?\n/); } catch { return null; }
+  const res = lines.map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((pat) => {
+    const dir = pat.endsWith("/");
+    const anchored = pat.startsWith("/") || pat.replace(/\/$/, "").includes("/");
+    const body = pat.replace(/^\//, "").replace(/\/$/, "").replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\/?/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, "(?:.*/)?");
+    return new RegExp(`${anchored ? "^" : "(^|/)"}${body}${dir ? "/" : "($|/)"}`);
+  });
+  return res.length ? (rel) => res.some((r) => r.test(rel)) : null;
+}
+
 function walk(root, max = 15000) {
   const out = [];
+  const ignored = scanIgnore(root);
+  out.skipped = 0;
   const stack = [root];
   while (stack.length && out.length < max) {
     const dir = stack.pop();
@@ -22,7 +40,9 @@ function walk(root, max = 15000) {
       if (e.isDirectory()) { if (!IGNORED.has(e.name)) stack.push(full); }
       else if (e.isFile()) {
         const rel = path.relative(root, full).split(path.sep).join("/");
-        if (TEXT_EXT.test(rel) && !/package-lock|yarn\.lock|pnpm-lock/.test(rel)) out.push(rel);
+        if (!TEXT_EXT.test(rel) || /package-lock|yarn\.lock|pnpm-lock/.test(rel)) continue;
+        if (ignored?.(rel)) { out.skipped++; continue; }
+        out.push(rel);
       }
     }
   }
@@ -244,9 +264,11 @@ export function scanRepo(repoPath) {
   const credentials = scanCredentials(repoPath);
   const reporting = scanReporting(repoPath, credentials);
   const publicCreds = credentials.map(({ _index, _match, _quote, ...f }) => f);
+  const skipped = walk(path.resolve(repoPath)).skipped;
   return {
     credentials: publicCreds,
     reporting,
-    summary: `${credentials.length} hard-coded credential(s) (${credentials.filter((c) => c.autoFix).length} auto-fixable), ${reporting.length} external reporting integration(s)`,
+    skipped: skipped ? `${skipped} file(s) not scanned: listed in ${SCAN_IGNORE_FILE}` : undefined,
+    summary: `${credentials.length} hard-coded credential(s) (${credentials.filter((c) => c.autoFix).length} auto-fixable), ${reporting.length} external reporting integration(s)${skipped ? `; ${skipped} file(s) skipped by ${SCAN_IGNORE_FILE}` : ""}`,
   };
 }

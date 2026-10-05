@@ -453,6 +453,18 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   gh.close();
 }
 
+// a repo can keep its own fake test data out of the credential scan
+{
+  const os = await import("node:os");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "he-scanignore-"));
+  fs.cpSync(fx("creds"), repo, { recursive: true });
+  const before = JSON.parse((await call("scan_credentials_and_reporting", { repoPath: repo })).text);
+  fs.mkdirSync(path.join(repo, ".hyperexecute"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".hyperexecute", "scan-ignore"), "# fake keys for tests\nsrc/test/\npy/\n");
+  const after = JSON.parse((await call("scan_credentials_and_reporting", { repoPath: repo })).text);
+  check("scan-ignore: listed paths skipped and reported, the rest still scanned", before.credentials.some((c) => c.file.startsWith("src/test/")) && !after.credentials.some((c) => c.file.startsWith("src/test/") || c.file.startsWith("py/")) && after.credentials.some((c) => c.file.startsWith("js/")) && /skipped by \.hyperexecute\/scan-ignore/.test(after.summary), after.summary);
+}
+
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
 await client.close();
 process.exit(failures ? 1 : 0);

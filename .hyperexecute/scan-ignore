@@ -1,0 +1,8 @@
+# HyperExecute Studio's own repo: fake credentials and integrations used as test data,
+# and the scanner's own source (it names every integration it looks for).
+test/fixtures/
+test/smoke.js
+src/security.js
+src/index.js
+vscode-extension/core/
+vscode-extension/.build/
