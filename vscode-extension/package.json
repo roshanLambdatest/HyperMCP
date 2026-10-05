@@ -2,7 +2,7 @@
   "name": "hyperexecute-yaml-studio",
   "displayName": "HyperExecute Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {
@@ -161,8 +161,16 @@
         },
         "hyperexecute.autoUpdate": {
           "type": "string",
-          "enum": ["notify", "install", "off"],
-          "enumDescriptions": ["Ask before installing a new release", "Install new releases automatically, then offer a reload", "Never check (use HyperExecute: Check for updates)"],
+          "enum": [
+            "notify",
+            "install",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Ask before installing a new release",
+            "Install new releases automatically, then offer a reload",
+            "Never check (use HyperExecute: Check for updates)"
+          ],
           "default": "notify",
           "description": "Updates from the GitHub releases, checked every 15 minutes and when VS Code gets focus, so a new release is offered soon after it's published (at most once a day per version). Downloads are verified against the release's SHA-256."
         },

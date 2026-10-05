@@ -1,7 +1,7 @@
 {
   "name": "hyperexecute-studio-web",
   "private": true,
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "HyperExecute Studio in the browser: analysis, YAML generation, validation, optimizing, credential scan and log diagnosis run client-side. No server; code never leaves the user's machine.",
   "scripts": {
     "build": "node build.js",
