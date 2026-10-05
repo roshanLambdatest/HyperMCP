@@ -201,7 +201,7 @@ Weekly: `npm run feedback` (or the `review_diagnosis_feedback` tool) → for eac
 2. `git tag v1.2.0 && git push origin main --tags`
 3. GitHub Actions runs the tests, builds `hyperexecute-studio.vsix`, and attaches it to the **v1.2.0** release.
 
-Teammates install it from the Releases page: download the `.vsix`, then in the Extensions view choose `⋯` → **Install from VSIX…**, then run **Developer: Reload Window**.
+Teammates install it from the Releases page: download the `.vsix`, then in the Extensions view choose `⋯` → **Install from VSIX…**, then run **Developer: Reload Window**. That's needed once: from v1.9.1 the extension updates itself from the GitHub releases (checked daily, verified against each release's SHA-256; `hyperexecute.autoUpdate` = `notify`, `install` or `off`; **HyperExecute: Check for updates** checks now).
 
 ## LambdaTest account: saved once, used everywhere
 - Save it once: Studio **Setup → LambdaTest account**, or the `set_lambdatest_credentials` MCP tool. It's verified against LambdaTest, then stored in `~/.hyperexecute-studio/credentials.json` (readable only by you). The Studio also keeps a copy in VS Code's secret storage.

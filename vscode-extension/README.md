@@ -13,6 +13,7 @@ A docked side-bar view (like Claude Code) for building HyperExecute YAMLs from t
 - **Learns from fixes that worked**: when a run passes right after a fix, the failure and the YAML change are remembered (on this machine and in the repo's `.hyperexecute/team.json`). The same failure later shows **Fixed before** with that change, and Ask AI to fix uses it first.
 - **Add to Confluence** (header button, or the command palette): creates a Confluence page documenting what was done for the repo: steps, the YAML (credentials only as secret references), runs with job links, problems and fixes, what was learned and next steps. Preview it first if you like. Uses your Confluence connection; set the space in `hyperexecute.confluencePublishSpace` and, optionally, a parent page in `hyperexecute.confluenceParentPageId`.
 - **Optimize** (YAML tab): speed, cost and reliability suggestions; apply the ones you pick.
+- **Updates itself**: once a day it checks the GitHub releases. A newer version is offered (or installed, with `hyperexecute.autoUpdate: install`), checked against the release's SHA-256, then a reload is offered. **HyperExecute: Check for updates** checks now; `off` stops the daily check.
 - **Reload to update**: when a newer version is installed while VS Code is open, a prompt and a status-bar item offer **Reload Window**.
 - **MCP server**: the same tools are registered for VS Code agent mode.
 

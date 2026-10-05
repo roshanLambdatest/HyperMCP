@@ -2,7 +2,7 @@
   "name": "hyperexecute-yaml-studio",
   "displayName": "HyperExecute Studio",
   "description": "Analyze a test-automation repo and build, validate and run a HyperExecute YAML by describing what you need.",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "publisher": "roshank-lambdatest",
   "license": "MIT",
   "engines": {
@@ -27,6 +27,10 @@
       {
         "command": "hyperexecute.addToConfluence",
         "title": "HyperExecute: Add to Confluence (document what was done)"
+      },
+      {
+        "command": "hyperexecute.checkForUpdates",
+        "title": "HyperExecute: Check for updates"
       },
       {
         "command": "hyperexecute.syncGists",
@@ -154,6 +158,13 @@
           "type": "string",
           "default": "",
           "description": "Optional: id of the Confluence page that Add to Confluence pages are created under."
+        },
+        "hyperexecute.autoUpdate": {
+          "type": "string",
+          "enum": ["notify", "install", "off"],
+          "enumDescriptions": ["Ask before installing a new release", "Install new releases automatically, then offer a reload", "Never check (use HyperExecute: Check for updates)"],
+          "default": "notify",
+          "description": "Updates from the GitHub releases, checked once a day. Downloads are verified against the release's SHA-256."
         },
         "hyperexecute.gistSources": {
           "type": "string",

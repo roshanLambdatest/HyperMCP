@@ -9,6 +9,9 @@ const settings = { aiBackend: process.env.BACKEND || "rules", confluenceSpace: "
 const secrets = new Map(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : []);
 if (process.env.ATL_EMAIL) settings.atlassianEmail = process.env.ATL_EMAIL;
 let onMessage;
+const commandHandlers = {};
+const executed = [];
+let infoPick = (a) => (a.includes("Create page") ? "Create page" : undefined);
 let viewProvider;
 const fixture = (n) => path.join(__dirname, "..", "..", "test", "fixtures", n);
 const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "he-repo-"));
@@ -33,18 +36,19 @@ const vscodeStub = {
       onDidDispose: () => {}, reveal: () => {},
     }),
     showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => ["Overwrite", "Regenerate", "Replace", "Apply", "Download it"].includes(x)); },
-    showInformationMessage: async (...a) => (a.includes("Create page") ? "Create page" : undefined), showErrorMessage: async (m) => console.log("  [error]", m),
+    showInformationMessage: async (...a) => infoPick(a), withProgress: async (_o, f) => f(), showErrorMessage: async (m) => console.log("  [error]", m),
     createStatusBarItem: () => ({ show() {}, dispose() {} }),
     registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
     showTextDocument: async () => {}, createOutputChannel: () => ({ append() {}, appendLine() {}, show() {} }), createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
   },
-  commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} },
+  commands: { registerCommand: (id, f) => { commandHandlers[id] = f; return { dispose() {} }; }, executeCommand: async (id, ...a) => { executed.push([id, ...a]); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
   lm: { selectChatModels: async () => [] },
   WorkspaceEdit: class { constructor() { this.ops = []; } replace(uri, range, text) { this.ops.push({ uri, text }); } },
   Range: class { constructor(a, b) { this.a = a; this.b = b; } },
   Position: class { constructor(l, c) { this.l = l; this.c = c; } },
   Uri: { file: (p) => ({ fsPath: p }), parse: (p) => ({ fsPath: p }) },
+  ProgressLocation: { Notification: 15 },
   ViewColumn: { Active: 1, Beside: 2 }, StatusBarAlignment: { Right: 2 }, ConfigurationTarget: { Global: 1 },
   CancellationTokenSource: class { constructor() { this.token = { onCancellationRequested() {} }; } cancel() {} dispose() {} },
   EventEmitter: class { constructor() { this.event = () => {}; } fire() {} },
@@ -245,6 +249,34 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
     const asked = posted.slice(before).some((m) => m.type === "showPane" && m.pane === "setup");
     check("Studio uses the account saved by the MCP tool, no Setup prompt", !asked && lastState().run?.attempt === 1 && lastState().meta.ltUser === "roshan", JSON.stringify(lastState().run?.status));
     check("Studio run filled the temporary YAML and removed it", /filled$/.test(fs.readFileSync(path.join(tmpRepo, ".fake-last-config"), "utf8")) && !fs.readdirSync(tmpRepo).some((n) => n.startsWith(".hyperexecute-run-")));
+  }
+  // updates from GitHub releases: a newer release is offered, downloaded, checked and installed
+  {
+    const crypto = require("crypto");
+    const vsix = Buffer.concat([Buffer.from("PK"), crypto.randomBytes(4000)]);
+    let digest = "sha256:" + crypto.createHash("sha256").update(vsix).digest("hex");
+    const realFetch = global.fetch;
+    global.fetch = async (url) => {
+      if (String(url).startsWith("https://api.github.com/repos/roshanLambdatest/HyperMCP/releases/latest"))
+        return new Response(JSON.stringify({ tag_name: "v9.9.9", html_url: "https://github.com/roshanLambdatest/HyperMCP/releases/tag/v9.9.9", assets: [{ name: "hyperexecute-studio.vsix", browser_download_url: "https://github.com/roshanLambdatest/HyperMCP/releases/download/v9.9.9/hyperexecute-studio.vsix", digest }] }), { status: 200 });
+      if (String(url).includes("/releases/download/v9.9.9/")) return new Response(vsix, { status: 200 });
+      return realFetch(url);
+    };
+    ctx.extension = { packageJSON: require("../package.json") };
+    let asked = null;
+    infoPick = (a) => { asked = a[0]; return "Update"; };
+    await commandHandlers["hyperexecute.checkForUpdates"]();
+    const inst = executed.find((e) => e[0] === "workbench.extensions.installExtension");
+    check("update: newer release offered, verified and installed", /9\.9\.9 is available/.test(asked || "") && inst && /hyperexecute-studio-9\.9\.9\.vsix$/.test(inst[1].fsPath), JSON.stringify({ asked, inst }));
+    executed.length = 0;
+    digest = "sha256:" + "0".repeat(64);
+    let err = null;
+    const errStub = vscodeStub.window.showErrorMessage;
+    vscodeStub.window.showErrorMessage = async (m) => { err = m; };
+    await commandHandlers["hyperexecute.checkForUpdates"]();
+    check("update: a download that doesn't match the release SHA-256 is not installed", /SHA-256/.test(err || "") && !executed.some((e) => e[0] === "workbench.extensions.installExtension"), err);
+    vscodeStub.window.showErrorMessage = errStub;
+    global.fetch = realFetch;
   }
   if (process.env.DUMP_POSTED) fs.writeFileSync(process.env.DUMP_POSTED, JSON.stringify(posted));
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");

@@ -47,6 +47,7 @@ function activate(context) {
     vscode.commands.registerCommand("hyperexecute.setAtlassianToken", () => setAtlassian(context)),
     vscode.commands.registerCommand("hyperexecute.addToConfluence", () => studio.publishConfluence()),
     vscode.commands.registerCommand("hyperexecute.syncGists", () => syncGistKnowledge(context, true)),
+    vscode.commands.registerCommand("hyperexecute.checkForUpdates", () => checkForUpdate(context, true)),
     vscode.commands.registerCommand("hyperexecute.setAnthropicKey", () => setAnthropicKey(context)),
     vscode.commands.registerCommand("hyperexecute.chooseBackend", () => chooseBackend(context)),
     vscode.commands.registerCommand("hyperexecute.validateActiveFile", () => validateActive()),
@@ -72,6 +73,7 @@ function activate(context) {
 
   registerMcpServer(context);
   watchForNewerVersion(context, status);
+  watchForUpdates(context);
 }
 
 // ---------- "Reload to update" ----------
@@ -134,6 +136,84 @@ function watchForNewerVersion(context, status) {
     const w = fs.watch(path.dirname(context.extensionPath), soon); // new version folder appears
     context.subscriptions.push({ dispose: () => w.close() });
   } catch {}
+}
+
+// ---------- Updates from GitHub releases ----------
+// The extension isn't on the Marketplace, so it updates itself: once a day it looks at the latest GitHub
+// release of this repo, and (hyperexecute.autoUpdate) offers or installs a newer .vsix. The download is
+// checked against the release's SHA-256 before it is installed; the "Reload to update" watcher above
+// then offers the reload. All windows share one check per day (globalState).
+
+const RELEASES = "https://api.github.com/repos/roshanLambdatest/HyperMCP/releases/latest";
+const ASSET = "hyperexecute-studio.vsix";
+const DAY = 24 * 3600 * 1000;
+
+async function latestRelease() {
+  const res = await fetch(RELEASES, { headers: { Accept: "application/vnd.github+json", "User-Agent": "hyperexecute-studio" }, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(res.status === 403 ? "GitHub's hourly limit was reached; try again later" : `GitHub ${res.status}`);
+  const r = await res.json();
+  const asset = (r.assets || []).find((a) => a.name === ASSET);
+  return { version: String(r.tag_name || "").replace(/^v/, ""), url: asset?.browser_download_url, sha256: /^sha256:[0-9a-f]{64}$/.test(asset?.digest || "") ? asset.digest.slice(7) : null, notes: r.html_url };
+}
+
+async function downloadVsix(rel) {
+  const u = new URL(rel.url);
+  if (u.protocol !== "https:" || u.hostname !== "github.com" || !u.pathname.startsWith("/roshanLambdatest/HyperMCP/releases/download/")) throw new Error(`Unexpected download location ${u.hostname}`);
+  const res = await fetch(rel.url, { signal: AbortSignal.timeout(120000) });
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 1000 || buf.subarray(0, 2).toString() !== "PK") throw new Error("The download isn't a .vsix package");
+  const sum = require("crypto").createHash("sha256").update(buf).digest("hex");
+  if (!rel.sha256) throw new Error("The release has no SHA-256 to check the download against; install it by hand");
+  if (sum !== rel.sha256) throw new Error("The download doesn't match the release's SHA-256; not installing it");
+  const file = path.join(require("os").tmpdir(), `hyperexecute-studio-${rel.version}.vsix`);
+  fs.writeFileSync(file, buf);
+  return file;
+}
+
+async function checkForUpdate(context, manual) {
+  const mode = vscode.workspace.getConfiguration("hyperexecute").get("autoUpdate") || "notify";
+  if (!manual && mode === "off") return;
+  const running = context.extension?.packageJSON?.version;
+  if (!running) return;
+  // one automatic check a day across all windows
+  if (!manual && Date.now() - (context.globalState.get("hyperexecute.updateCheckedAt") || 0) < DAY) return;
+  await context.globalState.update("hyperexecute.updateCheckedAt", Date.now());
+  let rel;
+  try {
+    rel = await latestRelease();
+  } catch (e) {
+    if (manual) vscode.window.showErrorMessage(`Couldn't check for updates: ${e.message}`);
+    return;
+  }
+  const installed = newestInstalledVersion(context) || running;
+  if (!rel.url || !/^\d+\.\d+\.\d+$/.test(rel.version) || cmpVersion(rel.version, installed) <= 0) {
+    if (manual) vscode.window.showInformationMessage(`HyperExecute Studio is up to date (${installed}).`);
+    return;
+  }
+  if (!manual && context.globalState.get("hyperexecute.skipVersion") === rel.version) return;
+  if (mode !== "install" || manual) {
+    const pick = await vscode.window.showInformationMessage(`HyperExecute Studio ${rel.version} is available (you have ${running}).`, "Update", "What's new", ...(manual ? [] : ["Skip this version"]));
+    if (pick === "What's new") return vscode.env.openExternal(vscode.Uri.parse(rel.notes));
+    if (pick === "Skip this version") return context.globalState.update("hyperexecute.skipVersion", rel.version);
+    if (pick !== "Update") return;
+  }
+  try {
+    const file = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Updating HyperExecute Studio to ${rel.version}…` }, async () => {
+      const f = await downloadVsix(rel);
+      await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(f));
+      return f;
+    });
+    fs.rm(file, { force: true }, () => {});
+  } catch (e) {
+    vscode.window.showErrorMessage(`Couldn't update HyperExecute Studio: ${e.message}`, "Open release").then((a) => a && vscode.env.openExternal(vscode.Uri.parse(rel.notes)));
+  }
+}
+
+function watchForUpdates(context) {
+  const t = setTimeout(() => checkForUpdate(context, false), 20000); // after startup settles
+  const i = setInterval(() => checkForUpdate(context, false), 6 * 3600 * 1000); // long-open windows; the daily limit still applies
+  context.subscriptions.push({ dispose: () => { clearTimeout(t); clearInterval(i); } });
 }
 
 // Expose the bundled MCP server to VS Code agent mode (Copilot etc.).
