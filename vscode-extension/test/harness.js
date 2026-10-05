@@ -14,7 +14,7 @@ const fixture = (n) => path.join(__dirname, "..", "..", "test", "fixtures", n);
 const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "he-repo-"));
 // learning and caches go to a throwaway folder, not the developer's ~/.hyperexecute-studio
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-Object.assign(process.env, { HE_STATE_DIR: stateDir, HE_KB_CACHE_DIR: path.join(stateDir, "kb-cache"), HE_FEEDBACK_DIR: path.join(stateDir, "feedback") });
+Object.assign(process.env, { HE_GISTS: "off", HE_STATE_DIR: stateDir, HE_KB_CACHE_DIR: path.join(stateDir, "kb-cache"), HE_FEEDBACK_DIR: path.join(stateDir, "feedback") });
 fs.cpSync(fixture(process.env.FIXTURE || "maven-cucumber"), tmpRepo, { recursive: true });
 
 const vscodeStub = {

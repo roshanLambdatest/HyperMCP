@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 {
   const os = await import("node:os");
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off" });
+  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off", HE_GISTS: "off" });
 }
 const fx = (n) => path.join(here, "fixtures", n);
 
@@ -32,7 +32,7 @@ const check = (label, cond, detail) => {
 };
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
-check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status", "remember_for_team", "publish_to_confluence"].every((t) => tools.includes(t)), tools);
+check("tools registered", ["analyze_repo", "generate_hyperexecute_yaml", "validate_hyperexecute_yaml", "dry_run_test_discovery", "search_knowledge_base", "get_confluence_page", "knowledge_base_status", "scan_credentials_and_reporting", "fix_hardcoded_credentials", "generate_lambdatest_capabilities", "optimize_hyperexecute_yaml", "run_hyperexecute_job", "get_hyperexecute_run", "fix_and_rerun_hyperexecute", "diagnose_hyperexecute_logs", "set_lambdatest_credentials", "lambdatest_credentials_status", "remember_for_team", "publish_to_confluence", "sync_gist_knowledge"].every((t) => tools.includes(t)), tools);
 
 // Java TestNG
 let a = JSON.parse((await call("analyze_repo", { repoPath: fx("maven-testng") })).text);
@@ -407,6 +407,50 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   check("unrecognized pre failure → YAML problem with the failing command's log, never test-failures", pf.diagnosis.status === "needs-attention" && pf.diagnosis.diagnoses[0].id === "pre-step-failed" && pf.diagnosis.failedStage.command === "./scripts/seed.sh" && /^----- failed pre step: \.\/scripts\/seed\.sh/.test(pf.logDigest) && !pf.diagnosis.diagnoses.some((x) => x.notYaml), pf);
   pf = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: preRepo, logText: "x [1]  pre (2s)\ntaskId:TASK-1 has failed with remark: step 1 - exit status 1\n    Failed pre stage percentage:          100.00%\n2 failed, 1 passed" })).text);
   check("pre failure seen only in CLI output → not test-failures", pf.diagnosis.status === "needs-attention" && pf.diagnosis.failedStage?.stage === "pre" && pf.diagnosis.failedStage.step === 1, pf);
+}
+
+// ---------- gists as knowledge (fake GitHub) ----------
+{
+  const os = await import("node:os");
+  const http = await import("node:http");
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-gists-"));
+  let listing = [
+    { id: "aaaa1111aaaa1111aaaa", description: "Maestro yaml for the kiosk app", updated_at: "2026-10-01T00:00:00Z", owner: { login: "FieldEngineer" }, files: { "maestro.yaml": { filename: "maestro.yaml", size: 200, raw_url: "RAW/maestro.yaml" } } },
+    { id: "bbbb2222bbbb2222bbbb", description: "", updated_at: "2026-10-01T00:00:00Z", owner: { login: "FieldEngineer" }, files: { "LT_MAC_Creds": { filename: "LT_MAC_Creds", size: 30, raw_url: "RAW/creds" } } },
+  ];
+  let rawHits = 0;
+  const gh = http.createServer((req, res) => {
+    if (req.url.startsWith("/users/FieldEngineer/gists")) { res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify(req.url.includes("page=1") ? listing : [])); }
+    if (req.url === "/RAW/maestro.yaml") { rawHits++; return res.end("version: 0.1\nrunson: android\npre:\n  - curl -Ls https://get.maestro.mobile.dev | bash\ntestRunnerCommand: hyperexecute --user fieldguy --key LT_abcdefghijklmnopqrstuvwxyz0123 && maestro test $test\nenv:\n  LT_ACCESS_KEY: ${{ .secrets.LT_ACCESS_KEY }}\n"); }
+    if (req.url === "/RAW/creds") return res.end("user=x key=y");
+    res.statusCode = 404; res.end("{}");
+  });
+  await new Promise((r) => gh.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${gh.address().port}`;
+  listing = JSON.parse(JSON.stringify(listing).replace(/RAW\//g, `${base}/RAW/`));
+  const env = { ...process.env, HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_GITHUB_API: base, HE_GISTS: "off", HE_LEARN: "off" };
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));
+  let g = JSON.parse((await call("sync_gist_knowledge", { sources: "https://gist.github.com/FieldEngineer" })).text);
+  const saved = fs.readdirSync(path.join(state, "kb-cache", "gists", "fieldengineer")).map((f) => fs.readFileSync(path.join(state, "kb-cache", "gists", "fieldengineer", f), "utf8")).join("\n");
+  check("gists: synced, credentials file skipped, secrets masked, references kept", g.gists === 2 && g.files === 1 && g.skipped.some((x) => /LT_MAC_Creds/.test(x)) && /maestro test/.test(saved) && !/fieldguy|LT_abcdefghij/.test(saved) && /\$\{\{ \.secrets\.LT_ACCESS_KEY \}\}/.test(saved), JSON.stringify(g) + saved.slice(0, 500));
+  const hit = JSON.parse((await call("search_knowledge_base", { query: "maestro kiosk yaml", source: "local" })).text);
+  check("gists: searchable, labelled as gist", hit.local?.[0]?.source === "gist" && /Maestro yaml for the kiosk app/.test(hit.local[0].section), JSON.stringify(hit.local?.[0] || hit).slice(0, 300));
+  g = JSON.parse((await call("sync_gist_knowledge", { sources: "FieldEngineer", force: true })).text);
+  const hits1 = rawHits;
+  listing = listing.slice(0, 1);
+  g = JSON.parse((await call("sync_gist_knowledge", { sources: "FieldEngineer", force: false })).text);
+  check("gists: recent sync is reused (no refetch)", /synced/.test(g.skipped || "") && rawHits === hits1, JSON.stringify(g));
+  const status = JSON.parse((await call("knowledge_base_status", {})).text);
+  {
+    const { gistSources } = await import("../src/gists.js");
+    const was = process.env.HE_GISTS;
+    const at = (v) => { if (v === undefined) delete process.env.HE_GISTS; else process.env.HE_GISTS = v; return gistSources(); };
+    check("gists: shared pool by default, HE_GISTS overrides, off disables", at(undefined) === "RishabhLambdaTest" && at("") === "RishabhLambdaTest" && at("someone,other") === "someone,other" && at("off") === "");
+    process.env.HE_GISTS = was;
+  }
+  check("gists: shown in knowledge_base_status", status.gists?.gists === 2 && status.gists.files === 1, JSON.stringify(status.gists));
+  gh.close();
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");

@@ -29,6 +29,10 @@
         "title": "HyperExecute: Add to Confluence (document what was done)"
       },
       {
+        "command": "hyperexecute.syncGists",
+        "title": "HyperExecute: Update knowledge from gists"
+      },
+      {
         "command": "hyperexecute.setAtlassianToken",
         "title": "Connect Confluence (Atlassian token)",
         "category": "HyperExecute"
@@ -150,6 +154,11 @@
           "type": "string",
           "default": "",
           "description": "Optional: id of the Confluence page that Add to Confluence pages are created under."
+        },
+        "hyperexecute.gistSources": {
+          "type": "string",
+          "default": "RishabhLambdaTest",
+          "description": "GitHub users or gist links (comma-separated) whose gists are used as knowledge. Default: the team's shared pool. Empty = off. Synced to this machine every 6 hours; credential files are skipped and secrets masked."
         },
         "hyperexecute.outputFileName": {
           "type": "string",

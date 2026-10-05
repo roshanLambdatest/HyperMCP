@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -29,12 +29,15 @@ async function applyAtlassianEnv(context) {
   set("ATLASSIAN_API_TOKEN", token);
   set("CONFLUENCE_BASE_URL", cfg.get("confluenceBaseUrl"));
   set("CONFLUENCE_SPACE", cfg.get("confluenceSpace"));
+  process.env.HE_GISTS = cfg.get("gistSources") || "off"; // empty setting = off; the default is the shared pool
   return { email: cfg.get("atlassianEmail"), token };
 }
 
 function activate(context) {
   const studio = new Studio(context);
   Studio.current = studio;
+  setTimeout(() => syncGistKnowledge(context, false), 5000); // background, after startup
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("hyperexecute.gistSources") && syncGistKnowledge(context, false)));
   const open = async () => {
     await vscode.commands.executeCommand("workbench.view.extension.hyperexecute");
     await vscode.commands.executeCommand("hyperexecute.studio.focus");
@@ -43,6 +46,7 @@ function activate(context) {
     vscode.commands.registerCommand("hyperexecute.openStudio", open),
     vscode.commands.registerCommand("hyperexecute.setAtlassianToken", () => setAtlassian(context)),
     vscode.commands.registerCommand("hyperexecute.addToConfluence", () => studio.publishConfluence()),
+    vscode.commands.registerCommand("hyperexecute.syncGists", () => syncGistKnowledge(context, true)),
     vscode.commands.registerCommand("hyperexecute.setAnthropicKey", () => setAnthropicKey(context)),
     vscode.commands.registerCommand("hyperexecute.chooseBackend", () => chooseBackend(context)),
     vscode.commands.registerCommand("hyperexecute.validateActiveFile", () => validateActive()),
@@ -155,6 +159,22 @@ function registerMcpServer(context) {
     context.secrets.onDidChange(() => emitter.fire()),
     vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("hyperexecute") && emitter.fire())
   );
+}
+
+// Gists as knowledge (hyperexecute.gistSources): refreshed in the background, at most every 6 hours unless asked.
+async function syncGistKnowledge(context, manual) {
+  await applyAtlassianEnv(context);
+  if (/^off$/i.test(process.env.HE_GISTS)) {
+    if (manual) vscode.window.showInformationMessage("Gist knowledge is off. Set hyperexecute.gistSources to a GitHub user or gist links.", "Open settings").then((a) => a && vscode.commands.executeCommand("workbench.action.openSettings", "hyperexecute.gistSources"));
+    return;
+  }
+  try {
+    const c = await loadCore();
+    const r = await c.syncGists({ force: !!manual });
+    if (manual) vscode.window.showInformationMessage(`Gist knowledge updated: ${r.gists ?? 0} gists, ${r.files ?? 0} files${r.skipped?.length ? `, ${r.skipped.length} skipped (credentials or not text)` : ""}.`);
+  } catch (e) {
+    if (manual) vscode.window.showErrorMessage(`Couldn't update gist knowledge: ${e.message}`);
+  }
 }
 
 async function setAtlassian(context) {

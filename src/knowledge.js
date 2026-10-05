@@ -1,6 +1,7 @@
 // Local knowledge base: every .md file in ./knowledge (and HE_KB_DIR, if set) is indexed by "## " sections;
 // .yaml/.yml/.txt files (e.g. knowledge/golden/*.yaml) are indexed whole.
-// Confluence pages that were read once are cached in ~/.hyperexecute-studio/kb-cache and searched offline too.
+// Confluence pages that were read once are cached in ~/.hyperexecute-studio/kb-cache and searched offline too,
+// as are GitHub gists synced with HE_GISTS (kb-cache/gists, see gists.js).
 // Search is BM25 with light stemming and HyperExecute synonyms, so "tests not found" also finds "0 tests discovered".
 
 import fs from "node:fs";
@@ -27,12 +28,16 @@ const EMBEDDED = () => globalThis.__HE_KB_FILES__;
 function kbFiles() {
   const out = [];
   for (const dir of KB_DIRS) {
-    const source = dir === KB_CACHE_DIR ? "confluence-cache" : "local";
+    const cacheSource = (rel) => (rel.startsWith("gists/") ? "gist" : "confluence-cache");
+    const source = dir === KB_CACHE_DIR ? null : "local";
     if (dir === KB_DIRS[0] && EMBEDDED()) {
       for (const f of EMBEDDED()) out.push({ source, rel: f.path, file: f.path, text: f.text });
       continue;
     }
-    for (const file of mdFiles(dir)) out.push({ source, rel: path.relative(dir, file).split(path.sep).join("/"), file, text: fs.readFileSync(file, "utf8") });
+    for (const file of mdFiles(dir)) {
+      const rel = path.relative(dir, file).split(path.sep).join("/");
+      out.push({ source: source || cacheSource(rel), rel, file, text: fs.readFileSync(file, "utf8") });
+    }
   }
   return out;
 }

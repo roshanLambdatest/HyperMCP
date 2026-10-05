@@ -24,6 +24,7 @@ import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
 import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
 import { buildSetupReport } from "./report.js";
+import { syncGists, gistsStatus, gistSources } from "./gists.js";
 
 // Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
 const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
@@ -46,6 +47,7 @@ Rules that matter:
 - Learning from what worked: when a fix makes the next run pass, the failure and the YAML change are remembered automatically (this machine + the repo's team memory). When get_hyperexecute_run or diagnose_hyperexecute_logs returns fixedBefore, try that change first if it fits the YAML.
 - When the user states a lasting decision for this repo ("always win11", "use the ci profile", "staging needs the tunnel") or corrects the YAML in a way that should stick, call remember_for_team so every teammate's agent gets it.
 - Grid connection: generate_lambdatest_capabilities finds where the repo connects. Tell the user those file:line locations; change the existing code in place only when asked. Never create a new helper or connection file.
+- Knowledge results with source "gist" are field examples from real customer setups (HE_GISTS): reuse their patterns (discovery scripts, pre steps, runTest.sh), but check against the docs and this repo, and never copy another customer's names, URLs or values.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
 
 const server = new McpServer({ name: "hyperexecute", version: "1.8.0" }, { instructions: INSTRUCTIONS });
@@ -326,6 +328,28 @@ server.registerTool(
 );
 
 server.registerTool(
+  "sync_gist_knowledge",
+  {
+    title: "Update knowledge from GitHub gists",
+    description:
+      "Fetch GitHub gists (field examples: HyperExecute YAMLs, discovery scripts, runTest.sh, pre/setup scripts) into the local knowledge base so search_knowledge_base finds them. Sources: a GitHub user or gist links (default HE_GISTS). Only changed gists are fetched; files that look like credentials are skipped and secrets are masked. USE when the user asks to update knowledge from gists or when gist results look stale. Nothing is sent anywhere; the cache stays on this machine.",
+    inputSchema: {
+      sources: z.string().optional().describe('GitHub user(s) or gist link(s), comma-separated. Default: HE_GISTS, else the shared pool (RishabhLambdaTest)'),
+      force: z.boolean().optional().describe("Refetch everything, even if synced recently"),
+    },
+  },
+  async ({ sources, force }) => {
+    try {
+      const src = sources || gistSources();
+      const r = await syncGists({ sources: src, force: !!force });
+      return text({ ...r, status: gistsStatus(), next: "search_knowledge_base now includes these gists (source: gist)." });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
   "knowledge_base_status",
   {
     title: "Knowledge base status",
@@ -346,7 +370,7 @@ server.registerTool(
         confluence.connection = e.message;
       }
     }
-    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), confluence });
+    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), gists: { sources: gistSources() || "off", ...gistsStatus() }, confluence });
   }
 );
 
@@ -972,3 +996,6 @@ Steps:
 );
 
 await server.connect(new StdioServerTransport());
+
+// Keep the shared gist knowledge fresh: refresh in the background when the last sync is older than 6 hours.
+if (gistSources()) syncGists().catch((e) => console.error(`gist sync: ${e.message}`));
