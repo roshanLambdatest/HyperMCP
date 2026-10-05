@@ -52,7 +52,7 @@ Rules that matter:
 - Knowledge results with source "gist" are field examples from real customer setups (HE_GISTS): reuse their patterns (discovery scripts, pre steps, runTest.sh), but check against the docs and this repo, and never copy another customer's names, URLs or values.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
 
-const server = new McpServer({ name: "hyperexecute", version: "1.9.2" }, { instructions: INSTRUCTIONS });
+const server = new McpServer({ name: "hyperexecute", version: "1.9.3" }, { instructions: INSTRUCTIONS });
 
 const text = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
