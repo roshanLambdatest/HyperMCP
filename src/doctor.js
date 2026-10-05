@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { toSelector, testLabel, collectTestResults, parseResultFile } from "./results.js";
-import { cleanLine, isNoise } from "./feedback.js";
+import { cleanLine, isNoise } from "./loglines.js";
 
 function dedupeTests(tests) {
   const m = new Map();

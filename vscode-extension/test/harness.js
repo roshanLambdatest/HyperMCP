@@ -31,6 +31,7 @@ const vscodeStub = {
     onDidChangeConfiguration: () => ({ dispose() {} }),
   },
   window: {
+    onDidChangeWindowState: () => ({ dispose() {} }),
     createWebviewPanel: () => ({
       webview: { cspSource: "vscode-resource:", asWebviewUri: (u) => u.fsPath, postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))), onDidReceiveMessage: (f) => (onMessage = f), set html(v) { this._html = v; }, get html() { return this._html; } },
       onDidDispose: () => {}, reveal: () => {},

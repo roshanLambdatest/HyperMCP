@@ -139,21 +139,32 @@ function watchForNewerVersion(context, status) {
 }
 
 // ---------- Updates from GitHub releases ----------
-// The extension isn't on the Marketplace, so it updates itself: once a day it looks at the latest GitHub
-// release of this repo, and (hyperexecute.autoUpdate) offers or installs a newer .vsix. The download is
-// checked against the release's SHA-256 before it is installed; the "Reload to update" watcher above
-// then offers the reload. All windows share one check per day (globalState).
+// The extension isn't on the Marketplace, so it updates itself: it looks at the latest GitHub release of this
+// repo every 15 minutes and whenever a VS Code window gets focus (at most every 5 minutes), and
+// (hyperexecute.autoUpdate) offers or installs a newer .vsix as soon as one is published. The download is
+// checked against the release's SHA-256 before it is installed; the "Reload to update" watcher above then
+// offers the reload. Checks are conditional requests (ETag): an unchanged release answers 304, which
+// doesn't count against GitHub's hourly limit for unauthenticated calls. All windows share the throttle, and
+// a version is offered once a day at most (globalState), so frequent checks never mean frequent prompts.
 
 const RELEASES = "https://api.github.com/repos/roshanLambdatest/HyperMCP/releases/latest";
 const ASSET = "hyperexecute-studio.vsix";
 const DAY = 24 * 3600 * 1000;
+const CHECK_EVERY = 15 * 60 * 1000;
+const MIN_GAP = 5 * 60 * 1000;
 
-async function latestRelease() {
-  const res = await fetch(RELEASES, { headers: { Accept: "application/vnd.github+json", "User-Agent": "hyperexecute-studio" }, signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(res.status === 403 ? "GitHub's hourly limit was reached; try again later" : `GitHub ${res.status}`);
+async function latestRelease(context) {
+  const cached = context.globalState.get("hyperexecute.latestRelease");
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": "hyperexecute-studio" };
+  if (cached?.etag) headers["If-None-Match"] = cached.etag;
+  const res = await fetch(RELEASES, { headers, signal: AbortSignal.timeout(15000) });
+  if (res.status === 304 && cached?.release) return cached.release;
+  if (!res.ok) throw new Error(res.status === 403 || res.status === 429 ? "GitHub's hourly limit was reached; try again later" : `GitHub ${res.status}`);
   const r = await res.json();
   const asset = (r.assets || []).find((a) => a.name === ASSET);
-  return { version: String(r.tag_name || "").replace(/^v/, ""), url: asset?.browser_download_url, sha256: /^sha256:[0-9a-f]{64}$/.test(asset?.digest || "") ? asset.digest.slice(7) : null, notes: r.html_url };
+  const release = { version: String(r.tag_name || "").replace(/^v/, ""), url: asset?.browser_download_url, sha256: /^sha256:[0-9a-f]{64}$/.test(asset?.digest || "") ? asset.digest.slice(7) : null, notes: r.html_url };
+  await context.globalState.update("hyperexecute.latestRelease", { etag: res.headers.get("etag") || null, release });
+  return release;
 }
 
 async function downloadVsix(rel) {
@@ -176,12 +187,12 @@ async function checkForUpdate(context, manual) {
   if (!manual && mode === "off") return;
   const running = context.extension?.packageJSON?.version;
   if (!running) return;
-  // one automatic check a day across all windows
-  if (!manual && Date.now() - (context.globalState.get("hyperexecute.updateCheckedAt") || 0) < DAY) return;
+  // automatic checks: at most one every few minutes across all windows
+  if (!manual && Date.now() - (context.globalState.get("hyperexecute.updateCheckedAt") || 0) < MIN_GAP) return;
   await context.globalState.update("hyperexecute.updateCheckedAt", Date.now());
   let rel;
   try {
-    rel = await latestRelease();
+    rel = await latestRelease(context);
   } catch (e) {
     if (manual) vscode.window.showErrorMessage(`Couldn't check for updates: ${e.message}`);
     return;
@@ -192,7 +203,11 @@ async function checkForUpdate(context, manual) {
     return;
   }
   if (!manual && context.globalState.get("hyperexecute.skipVersion") === rel.version) return;
+  // checks run often; the question for one version comes back at most once a day
+  const offered = context.globalState.get("hyperexecute.offered") || {};
+  if (!manual && offered.version === rel.version && Date.now() - offered.at < DAY) return;
   if (mode !== "install" || manual) {
+    await context.globalState.update("hyperexecute.offered", { version: rel.version, at: Date.now() });
     const pick = await vscode.window.showInformationMessage(`HyperExecute Studio ${rel.version} is available (you have ${running}).`, "Update", "What's new", ...(manual ? [] : ["Skip this version"]));
     if (pick === "What's new") return vscode.env.openExternal(vscode.Uri.parse(rel.notes));
     if (pick === "Skip this version") return context.globalState.update("hyperexecute.skipVersion", rel.version);
@@ -212,8 +227,10 @@ async function checkForUpdate(context, manual) {
 
 function watchForUpdates(context) {
   const t = setTimeout(() => checkForUpdate(context, false), 20000); // after startup settles
-  const i = setInterval(() => checkForUpdate(context, false), 6 * 3600 * 1000); // long-open windows; the daily limit still applies
-  context.subscriptions.push({ dispose: () => { clearTimeout(t); clearInterval(i); } });
+  const i = setInterval(() => checkForUpdate(context, false), CHECK_EVERY);
+  // coming back to VS Code is when a new release matters: check then too (the throttle still applies)
+  const f = vscode.window.onDidChangeWindowState((s) => s.focused && checkForUpdate(context, false));
+  context.subscriptions.push(f, { dispose: () => { clearTimeout(t); clearInterval(i); } });
 }
 
 // Expose the bundled MCP server to VS Code agent mode (Copilot etc.).
@@ -1234,4 +1251,4 @@ function strip(v) {
 }
 
 function deactivate() {}
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, _checkForUpdate: checkForUpdate };

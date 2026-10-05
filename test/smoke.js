@@ -287,6 +287,45 @@ check("headline drops the CLI spinner and timestamp, so the same error groups ac
   check("fewer tests ran than the repo has → flagged", c1.verdict === "fewer-than-expected", c1);
 }
 
+// ---------- investigate: no rule explains it → evidence for the agent, guarded reruns, rule drafts ----------
+{
+  const os = await import("node:os");
+  const repo8 = fs.mkdtempSync(path.join(os.tmpdir(), "he-inv-"));
+  fs.cpSync(fx("maven-testng"), repo8, { recursive: true });
+  // the repo's own working setup passes a system property our YAML doesn't
+  fs.mkdirSync(path.join(repo8, "yaml"));
+  fs.writeFileSync(path.join(repo8, "yaml", "hyperexecute_linux.yaml"), "version: 0.1\nrunson: linux\ntestRunnerCommand: mvn test -Dcaps.json=\"$test\" -Dtest=$test\nenv:\n  LT_ACCESS_KEY: real-looking-key-123\n");
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, HE_FAKE: "unknown", ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") } }));
+  await call("generate_hyperexecute_yaml", { repoPath: repo8, yamlVersion: "0.1", write: true, embedCredentials: false, extraEnv: { BASE_URL: "https://example.com" } });
+  const r1 = JSON.parse((await call("run_hyperexecute_job", { repoPath: repo8 })).text);
+  const s1 = JSON.parse((await call("get_hyperexecute_run", { runId: r1.runId, waitSeconds: 30 })).text);
+  const inv = s1.investigation;
+  const own = inv?.repoYamls?.find((y) => y.file === "yaml/hyperexecute_linux.yaml");
+  check("unexplained failure → investigation with the repo's own YAML compared key by key",
+    ["unknown", "needs-attention"].includes(s1.status) && own?.differs.some((d) => d.key === "testRunnerCommand" && /caps\.json/.test(d.theirs)) && /investigation/.test(s1.next), s1);
+  check("investigation never shows a secret from the repo's YAML", !JSON.stringify(inv).includes("real-looking-key-123"), JSON.stringify(own));
+  check("investigation lists the build file", inv.repoFiles.some((f) => f.file === "pom.xml"), inv.repoFiles.map((f) => f.file));
+  const yaml0 = fs.readFileSync(path.join(repo8, "hyperexecute.yaml"), "utf8");
+  const same = await call("fix_and_rerun_hyperexecute", { runId: r1.runId, yamlContent: yaml0 });
+  check("an unchanged YAML is refused (no wasted attempt)", same.isError && /unchanged/i.test(same.text), same.text);
+  const withX = yaml0.replace(/^env:\n/m, "env:\n  FIX_A: \"1\"\n");
+  const f1 = JSON.parse((await call("fix_and_rerun_hyperexecute", { runId: r1.runId, yamlContent: withX, maxAttempts: 5 })).text);
+  const s2 = JSON.parse((await call("get_hyperexecute_run", { runId: f1.nextRun.runId, waitSeconds: 30 })).text);
+  const f2 = JSON.parse((await call("fix_and_rerun_hyperexecute", { runId: s2.runId, yamlContent: yaml0, maxAttempts: 5 })).text);
+  await call("get_hyperexecute_run", { runId: f2.nextRun.runId, waitSeconds: 30 });
+  const again = await call("fix_and_rerun_hyperexecute", { runId: f2.nextRun.runId, yamlContent: withX, maxAttempts: 5 });
+  check("a change already tried in this chain is refused", again.isError && /already tried/i.test(again.text), again.text);
+
+  // a fix the agent wrote made the next run pass → a rule draft for review
+  fs.appendFileSync(path.join(process.env.HE_FEEDBACK_DIR, "outcomes.jsonl"), JSON.stringify({ at: new Date().toISOString(), event: "custom-fix-worked", headline: "Error: Timeout of 2000ms exceeded. For async tests", framework: "mocha", language: "node", change: { removed: ["testRunnerCommand: npx mocha \"$test\""], added: ["testRunnerCommand: npx mocha --timeout=100000 \"$test\""] } }) + "\n");
+  const rv2 = JSON.parse((await call("review_diagnosis_feedback", {})).text);
+  const dr = rv2.ruleDrafts?.[0];
+  check("review drafts a rule from an agent fix that worked", dr?.times === 1 && /re: \/Error: Timeout of \\d\+ms exceeded/.test(dr.draft) && /\+ testRunnerCommand: npx mocha --timeout=100000/.test(dr.draft) && /ruleDrafts/.test(rv2.next), dr);
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env: { ...process.env, ATLASSIAN_API_TOKEN: "", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") } }));
+}
+
 // ---------- CI pipelines, playbook, Ruby, mobile, learning ----------
 {
   const os = await import("node:os");
@@ -514,7 +553,7 @@ check("headline drops the CLI spinner and timestamp, so the same error groups ac
     await start();
     let st2;
     for (let i = 0; i < 50 && !st2?.update; i++) { st2 = JSON.parse((await call("knowledge_base_status", {})).text); if (!st2.update) await new Promise((ok) => setTimeout(ok, 100)); }
-    check("update check: at most once a day (cached)", releaseHits === 1 && st2?.update?.latest === "99.0.0", JSON.stringify({ releaseHits, u: st2?.update }));
+    check("update check: a new session within minutes reuses the shared cache (no request)", releaseHits === 1 && st2?.update?.latest === "99.0.0", JSON.stringify({ releaseHits, u: st2?.update }));
   }
   gh.close();
 }

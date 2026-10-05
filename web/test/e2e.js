@@ -129,7 +129,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   y = await yaml();
   check("chat: env value fills the placeholder → valid", /BASE_URL: https:\/\/staging.example.com/.test(y) && /The YAML is valid/.test(r) && (await page.$eval("#statusPill", (e) => e.innerText)).includes("Valid"), r);
   r = await ask("split by method");
-  check("chat: split by method (v0.2 discoveryType)", /discoveryType: method/.test(await yaml()), r);
+  check("chat: split by method (v0.1 method discovery; Java defaults to v0.1)", /Split by: method/.test(await yaml()) && /print c"#"s/.test(await yaml()), r);
   r = await ask("Run it on Chrome and Firefox");
   y = await yaml();
   check("chat: browsers → matrix axis in v0.1", /browser:\s*\n\s*- chrome\s*\n\s*- firefox/.test(y) && /version: 0.1/.test(y), y.slice(0, 900));
@@ -140,7 +140,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   r = await ask("Optimize it");
   check("chat: optimize", /improvement|Nothing to optimize/.test(r), r);
   r = await ask("reset");
-  check("chat: reset to defaults", /version: "0.2"/.test(await yaml()), r);
+  check("chat: reset to defaults", /Split by: class/.test(await yaml()) && !/browser:/.test(await yaml()), r);
   r = await ask("org.openqa.selenium.WebDriverException: unknown error: net::ERR_NAME_NOT_RESOLVED (https://staging.acme.internal)\n  at com.acme.LoginTest.open(LoginTest.java:21)\nJob failed");
   check("chat: pasted log → diagnosis with a fix", /fixable/i.test(r) && /Use the corrected YAML/.test(r), r);
   await page.evaluate(() => [...document.querySelectorAll("#msgs .chip")].find((c) => c.textContent.includes("Use the corrected YAML")).click());

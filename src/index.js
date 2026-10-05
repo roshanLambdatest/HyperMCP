@@ -19,10 +19,11 @@ import { confluenceConfig, searchConfluence, getConfluencePage, whoAmI, createCo
 import { scanRepo, scanCredentials, planCredentialFixes, applyCredentialFixes } from "./security.js";
 import { capabilityOptions, generateConnection, findDriverSetup, planConnectionChanges } from "./capabilities.js";
 import { optimizeYaml, applyOptimizations, describeSuggestions } from "./optimizer.js";
-import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir, headline } from "./feedback.js";
+import { recordUnmatched, recordOutcome, reviewFeedback, markReviewed, feedbackDir, headline, mask } from "./feedback.js";
 import { saveDryRun, checkDiscovery } from "./discovery-check.js";
 import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
-import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, applyTeamFixes, promotionCandidates, promoteTeamFix, markStoppedTeamFixes, personalFixSuggestions, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
+import { investigate, changeKey } from "./investigate.js";
+import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, yamlChange, applyTeamFixes, promotionCandidates, promoteTeamFix, markStoppedTeamFixes, personalFixSuggestions, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
 import { startUpdateCheck, updateInfo, takeUpdateNote } from "./updates.js";
 import { buildSetupReport } from "./report.js";
 import { syncGists, gistsStatus, gistSources } from "./gists.js";
@@ -53,7 +54,7 @@ Rules that matter:
 - Knowledge results with source "gist" are field examples from real customer setups (HE_GISTS): reuse their patterns (discovery scripts, pre steps, runTest.sh), but check against the docs and this repo, and never copy another customer's names, URLs or values.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
 
-const server = new McpServer({ name: "hyperexecute", version: "1.10.0" }, { instructions: INSTRUCTIONS });
+const server = new McpServer({ name: "hyperexecute", version: "1.11.0" }, { instructions: INSTRUCTIONS });
 
 // the first reply after a newer release is known carries a one-line note (a separate block, so JSON replies stay JSON)
 const text = (obj) => {
@@ -588,12 +589,17 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
       rec.failure = { headline: headline(evidence.text), ruleIds, title: rec.diagnosis.diagnoses[0]?.title };
       rec.learnedFix = findLearnedFix({ repo, ...rec.failure });
       // a promoted team fix that this failure points at stops being applied
+      // no rule explains it: gather the evidence the agent needs to propose a YAML change
+      if (["unknown", "needs-attention"].includes(rec.status)) {
+        try { rec.investigation = investigate({ repo, profile, yamlText, config: mainConfig, evidence, diagnosis: rec.diagnosis, failure: rec.failure, learnedFix: rec.learnedFix }); } catch {}
+      }
       rec.stoppedTeamFixes = markStoppedTeamFixes(repo, [rec.diagnosis.failedStage?.command, rec.failure.headline, ...rec.diagnosis.diagnoses.map((x) => x.evidence)].filter(Boolean).join("\n"));
     }
     // this run passed after a YAML fix: remember the failure and the change that fixed it
     const prev = parent && runs.get(parent);
     if (!r.stopped && ["passed", "passed-with-failures"].includes(rec.status) && prev?.fixedWith && prev.failure) {
       rec.learned = recordFixThatWorked({ repo, failure: prev.failure, ...prev.fixedWith, profile, jobId: rec.diagnosis.jobId });
+      if (prev.fixedWith.how === "custom") recordOutcome({ event: "custom-fix-worked", runId: id, fixedRunId: prev.id, headline: mask(prev.failure.headline || "").slice(0, 300), ruleIds: prev.failure.ruleIds, framework: profile.primaryFramework, language: profile.language, change: yamlChange(prev.fixedWith.before, prev.fixedWith.after) });
       if (rec.learned) rec.promote = promotionCandidates(repo, profile);
     }
     logStep(repo, `Run ${attempt}${rec.targeted ? " (affected tests only)" : ""} finished`, `${rec.status}${rec.diagnosis.diagnoses.length ? ` · ${rec.diagnosis.diagnoses.map((x) => x.title).join("; ")}` : ""}${rec.learned ? " · fix remembered" : ""}`);
@@ -645,14 +651,16 @@ function runView(rec, tailChars = 3000) {
     logFiles: rec.evidence?.files,
     logTail: rec.status === "running" ? rec.tail.slice(-tailChars) : undefined,
     logDigest: rec.status !== "running" && d && ["unknown", "needs-attention"].includes(d.status) ? rec.evidence?.digest : undefined,
+    investigation: rec.investigation,
     next:
       rec.status === "running" ? "Call get_hyperexecute_run again in a minute or two." :
       rec.discoveryCheck?.verdict === "zero-tests" && rec.status !== "fixable" ? "The job ran 0 tests. Fix discovery (dry_run_test_discovery, validate_hyperexecute_yaml), then rerun with fix_and_rerun_hyperexecute and yamlContent." :
       rec.status === "fixable" ? "Call fix_and_rerun_hyperexecute with this runId to apply the YAML fixes and start the next attempt." :
-      d?.failedStage && ["unknown", "needs-attention"].includes(rec.status) ? "The pre step failed before any test ran — a YAML/environment problem, not a test failure. Read diagnosis.failedStage (command + log) and logDigest, change the pre command or runtime in the YAML (validate it), then call fix_and_rerun_hyperexecute with yamlContent." :
+      d?.failedStage && ["unknown", "needs-attention"].includes(rec.status) ? "The pre step failed before any test ran — a YAML/environment problem, not a test failure. Read diagnosis.failedStage (command + log) and logDigest, change the pre command or runtime in the YAML (validate it), then call fix_and_rerun_hyperexecute with yamlContent. investigation lists the repo files and the repo's own YAMLs that bear on it." :
       rec.status === "fixable-tests" ? "Some tests failed for YAML/environment reasons (see diagnosis.tests.list). Call fix_and_rerun_hyperexecute — it fixes the YAML and reruns only those tests; code failures are left alone." :
       rec.status === "needs-input" ? `Tests need environment values the YAML doesn't have: ${(d?.needsValue || []).join(", ")}. Ask the user for them, then call fix_and_rerun_hyperexecute with values.` :
       rec.status === "test-failures" ? "The tests themselves failed — not a YAML problem. Report them; don't rerun." :
+      ["unknown", "needs-attention"].includes(rec.status) && rec.investigation ? "No rule explains this failure. Use investigation (failed step, the repo files it depends on, the repo's own HyperExecute YAMLs, knowledge) to find the cause; if it's in the YAML, validate the change and call fix_and_rerun_hyperexecute with yamlContent. If it's in test code, the app, the account or the platform, report it and stop." :
       ["unknown", "needs-attention"].includes(rec.status) ? "Read logDigest, decide on a YAML change (validate it), then call fix_and_rerun_hyperexecute with yamlContent." : undefined,
   };
 }
@@ -768,8 +776,14 @@ server.registerTool(
       }
       const v = validateYaml(next, rec.repo);
       if (!v.valid) throw new Error(`Fixed YAML doesn't validate: ${v.errors.join(" | ")}`);
+      // don't spend an attempt on nothing, or on a change this chain of attempts already tried
+      const key = changeKey(before, next);
+      if (!key) throw new Error("The YAML is unchanged — rerunning would fail the same way. Change what the evidence points at, or report the failure.");
+      const tried = [];
+      for (let p = rec; p; p = p.parent && runs.get(p.parent)) if (p.fixedWith?.key) tried.push(p.fixedWith.key);
+      if (tried.includes(key)) throw new Error("This exact change was already tried in this chain of attempts and the failure came back. Stopping: report the failure with the evidence instead.");
       fs.writeFileSync(file, next);
-      rec.fixedWith = { before, after: next, how: yamlContent ? "custom" : "rules", applied };
+      rec.fixedWith = { before, after: next, how: yamlContent ? "custom" : "rules", applied, key };
       logStep(rec.repo, "Fixed the YAML", applied.join("; "));
       const out = { applied, written: file };
       const ruleIds = (rec.diagnosis?.diagnoses || []).map((x) => x.id).concat((rec.diagnosis?.tests?.list || []).map((t) => t.rule).filter(Boolean));

@@ -59,6 +59,36 @@ const check = (l, c) => { console.log(`${c ? "PASS" : "FAIL"}  ${l}`); if (!c) f
   await new Promise((r) => setTimeout(r, 2000));
   check("prompt shown only once per version", shown.length === 1);
   for (const s of ctx.subscriptions) try { s.dispose(); } catch {}
+
+  // ---- the GitHub check: frequent, conditional (ETag), and a version is offered at most once a day ----
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "he-exts-"));
+  const run2 = path.join(dir2, "roshank-lambdatest.hyperexecute-yaml-studio-1.3.0");
+  fs.mkdirSync(run2);
+  fs.writeFileSync(path.join(dir2, "extensions.json"), JSON.stringify([{ identifier: { id: "roshank-lambdatest.hyperexecute-yaml-studio" }, version: "1.3.0" }]));
+  const state = new Map();
+  const ctx2 = { ...ctx, extensionPath: run2, subscriptions: [], globalState: { get: (k) => state.get(k), update: async (k, v) => state.set(k, v) } };
+  const calls = [];
+  global.fetch = async (url, o = {}) => {
+    calls.push(o.headers?.["If-None-Match"] || null);
+    if (o.headers?.["If-None-Match"] === '"v140"') return { status: 304, ok: false, headers: { get: () => '"v140"' } };
+    return { status: 200, ok: true, headers: { get: (h) => (h === "etag" ? '"v140"' : null) }, json: async () => ({ tag_name: "v1.4.0", html_url: "https://github.com/x", assets: [{ name: "hyperexecute-studio.vsix", browser_download_url: "https://github.com/roshanLambdatest/HyperMCP/releases/download/v1.4.0/hyperexecute-studio.vsix", digest: "sha256:" + "a".repeat(64) }] }) };
+  };
+  shown.length = 0;
+  vscodeStub.window.showInformationMessage = async (msg) => { shown.push(msg); return undefined; };
+  await ext._checkForUpdate(ctx2, false);
+  check("a newer release is offered on the first check", shown.length === 1 && /1\.4\.0 is available/.test(shown[0]));
+  await ext._checkForUpdate(ctx2, false);
+  check("checks within a few minutes are skipped", calls.length === 1 && shown.length === 1);
+  state.set("hyperexecute.updateCheckedAt", 0); // 5 minutes later
+  await ext._checkForUpdate(ctx2, false);
+  check("the next check is conditional (ETag → 304) and uses the cached release", calls[1] === '"v140"' && calls.length === 2);
+  check("the same version isn't offered again the same day", shown.length === 1);
+  state.set("hyperexecute.updateCheckedAt", 0);
+  state.set("hyperexecute.offered", { version: "1.4.0", at: Date.now() - 25 * 3600 * 1000 });
+  await ext._checkForUpdate(ctx2, false);
+  check("a day later it is offered again", shown.length === 2);
+  await ext._checkForUpdate(ctx2, true);
+  check("a manual check always answers", shown.length === 3);
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
   process.exit(fails ? 1 : 0);
 })();
