@@ -1037,7 +1037,7 @@ class Studio {
         currentYaml: this.state.yaml,
         diagnosis: run.diagnosis,
         fixedBefore: run.fixedBefore ? { note: "This failure was fixed before with this YAML change and the next run passed. Prefer it if it fits.", change: run.fixedBefore.change } : undefined,
-        logDigest: c.logDigest(this.lastEvidence.text),
+        logDigest: c.logDigest(this.lastEvidence),
         analysis: c.summarizeProfile(this.state.profileFull, 10),
       };
       const { plan, backend } = await ai.plan(this.context, context, "Fix the failed HyperExecute run.", undefined);

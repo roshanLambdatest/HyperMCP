@@ -388,6 +388,27 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   conf.close();
 }
 
+// Pre step failures: read the stage log (logs/<job>/tasks/<task>/pre, no extension) and fix the YAML from it
+{
+  const preRepo = fs.mkdtempSync(path.join((await import("node:os")).tmpdir(), "he-pre-"));
+  fs.cpSync(fx("playwright"), preRepo, { recursive: true });
+  await call("generate_hyperexecute_yaml", { repoPath: preRepo, yamlVersion: "0.1", write: true });
+  const task = path.join(preRepo, "he-logs", "logs", "job-1", "tasks", "TASK-1");
+  fs.mkdirSync(task, { recursive: true });
+  fs.mkdirSync(path.join(preRepo, "he-logs", ".hyperexecute"));
+  fs.writeFileSync(path.join(preRepo, "he-logs", ".hyperexecute", "result.json"), JSON.stringify({ id: "job-1", remark: "step 1 - exit status 1", tasks: [{ id: "TASK-1", status: "failed", remark: "step 1 - exit status 1", stages: [{ type: "prerun", status: "failed", name: "pre" }] }] }));
+  // the CLI debug log's transfer chatter must not read as failed tests
+  fs.writeFileSync(path.join(preRepo, "he-logs", "hyperexecute-cli.log"), [{ level: "debug", time: "2026-01-01T00:00:00.000+0530", msg: "Azcopy output: 100.0 %, 1 Done, 0 Failed, 0 Pending, 3 failed, 1 Total" }, { level: "info", time: "2026-01-01T00:00:01.000+0530", msg: "x [1]  pre (2s)\n" }].map((l) => JSON.stringify(l)).join("\n"));
+  fs.writeFileSync(path.join(task, "pre"), "******************* npm ci *******************\nnpm ERR! code ERESOLVE\nnpm ERR! ERESOLVE could not resolve\nnpm ERR! this command with --force, or --legacy-peer-deps\n");
+  let pf = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: preRepo, logPath: "he-logs" })).text);
+  check("pre failure (npm ERESOLVE) → fixable from the pre log", pf.diagnosis.status === "fixable" && pf.diagnosis.failedStage?.command === "npm ci" && pf.diagnosis.diagnoses[0].id === "npm-peer-deps" && /- npm ci --legacy-peer-deps/.test(pf.fixedYaml), pf);
+  fs.writeFileSync(path.join(task, "pre"), "******************* npm ci *******************\nadded 120 packages\n******************* ./scripts/seed.sh *******************\nseed: 3 failed, database refused connection\n");
+  pf = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: preRepo, logPath: "he-logs" })).text);
+  check("unrecognized pre failure → YAML problem with the failing command's log, never test-failures", pf.diagnosis.status === "needs-attention" && pf.diagnosis.diagnoses[0].id === "pre-step-failed" && pf.diagnosis.failedStage.command === "./scripts/seed.sh" && /^----- failed pre step: \.\/scripts\/seed\.sh/.test(pf.logDigest) && !pf.diagnosis.diagnoses.some((x) => x.notYaml), pf);
+  pf = JSON.parse((await call("diagnose_hyperexecute_logs", { repoPath: preRepo, logText: "x [1]  pre (2s)\ntaskId:TASK-1 has failed with remark: step 1 - exit status 1\n    Failed pre stage percentage:          100.00%\n2 failed, 1 passed" })).text);
+  check("pre failure seen only in CLI output → not test-failures", pf.diagnosis.status === "needs-attention" && pf.diagnosis.failedStage?.stage === "pre" && pf.diagnosis.failedStage.step === 1, pf);
+}
+
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
 await client.close();
 process.exit(failures ? 1 : 0);

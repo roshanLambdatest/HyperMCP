@@ -20,10 +20,60 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 // ---------- collecting evidence ----------
 
+// Stage logs come down as logs/<jobId>/tasks/<taskId>/<stage> — no file extension.
+const STAGE_LOG = /(?:^|\/)logs\/[^/]+\/tasks\/([^/]+)\/([^/.]+)(?:\.log)?$/;
+const stageKind = (s) => (/^pre/i.test(s || "") ? "pre" : /^post/i.test(s || "") ? "post" : String(s || "").toLowerCase());
+
+// The CLI's own debug log (hyperexecute-cli.log) is appended to on every run and is full of transfer
+// chatter ("1 Done, 0 Failed, 0 Pending"). Keep only this run's user-facing messages.
+function cliLogMessages(text, since) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    let j;
+    try { j = JSON.parse(line); } catch { continue; }
+    if (!j || j.level === "debug" || typeof j.msg !== "string") continue;
+    if (since && Date.parse(j.time) < since - 2000) continue;
+    out.push(j.msg.trimEnd());
+  }
+  return out.join("\n");
+}
+
+// Which stage stopped the job. Sources, best first: the job summary the CLI writes (.hyperexecute/result.json),
+// then the CLI's stage lines ("x [1]  pre (2s)", "Failed pre stage percentage: 100.00%").
+// Returns {stage, taskId, remark, step, command, log, file} or null. `log` is the failing command's output.
+export function findFailedStage({ output = "", files = [], job }) {
+  let hit = null;
+  for (const t of job?.tasks || []) {
+    const s = (t.stages || []).find((x) => /fail|error/i.test(x.status || ""));
+    if (s) { hit = { stage: stageKind(s.type || s.name), taskId: t.id || null, remark: t.remark || job.remark || null }; break; }
+  }
+  if (!hit) {
+    const m = output.match(/(?:^|[\n"])\s*[x✘✗×]\s+\[\d+\]\s+(pre|post)\w*\s+\(/i) || output.match(/Failed (pre|post) stage percentage:\s+(?!0+(?:\.0+)?%)[\d.]+%/i);
+    if (!m) return null;
+    hit = { stage: stageKind(m[1]), taskId: (output.match(/taskId:\s*([\w-]+) has failed/) || [])[1] || null, remark: null };
+  }
+  hit.remark = hit.remark || (output.match(/has failed with remark:\s*([^\n"\\]+)/) || [])[1]?.trim() || null;
+  hit.step = +(String(hit.remark || "").match(/\bstep (\d+)\b/i) || [])[1] || null;
+  const logs = files.filter((f) => f.stage && stageKind(f.stage) === hit.stage);
+  const f = logs.find((x) => x.taskId === hit.taskId) || logs[0];
+  hit.file = f?.file || null;
+  hit.command = null;
+  hit.log = null;
+  if (f) {
+    // each command's output starts with "******* <command> *******"; the job stops at the one that failed
+    const heads = [...f.text.matchAll(/^\*{5,} (.+?) \*{5,}[ \t]*$/gm)];
+    const last = heads[heads.length - 1];
+    hit.command = last ? last[1].trim() : null;
+    hit.log = (last ? f.text.slice(last.index + last[0].length) : f.text).trim().slice(-8000);
+  }
+  return hit;
+}
+
 // Reads CLI output plus any log/report files the CLI downloaded during this run.
 export function collectEvidence({ output = "", repoPath, since, artifactsDir }) {
   const files = [];
   const resultFiles = [];
+  let job = null;
   if (repoPath && since) {
     const root = path.resolve(repoPath);
     const stack = [root];
@@ -42,12 +92,15 @@ export function collectEvidence({ output = "", repoPath, since, artifactsDir }) 
         try { st = fs.statSync(full); } catch { continue; }
         if (st.mtimeMs < since) continue;
         if (/\.(xml|json|trx)$/i.test(e.name)) resultFiles.push(full);
-        if (!/\.(log|txt|json|xml|html?)$/i.test(e.name) || st.size > 2 * 1024 * 1024 || budget <= 0) continue;
         const rel = path.relative(root, full).split(path.sep).join("/");
+        const stage = rel.match(STAGE_LOG);
+        if ((!stage && !/\.(log|txt|json|xml|html?)$/i.test(e.name)) || st.size > 2 * 1024 * 1024 || budget <= 0) continue;
         if (/^src\/|\/src\//.test(rel) || rel === "hyperexecute.yaml") continue;
-        const text = fs.readFileSync(full, "utf8").slice(0, budget);
+        let text = fs.readFileSync(full, "utf8").slice(0, budget);
+        if (e.name === "hyperexecute-cli.log") text = cliLogMessages(text, since);
+        if (/\.json$/i.test(e.name) && /"stages"\s*:/.test(text)) { try { const j = JSON.parse(text); if (Array.isArray(j.tasks)) job = j; } catch {} }
         budget -= text.length;
-        files.push({ file: rel, text: e.name.endsWith(".html") ? text.replace(/<[^>]+>/g, " ") : text });
+        files.push({ file: rel, text: e.name.endsWith(".html") ? text.replace(/<[^>]+>/g, " ") : text, stage: stage ? stage[2] : null, taskId: stage ? stage[1] : null });
       }
     }
   }
@@ -59,6 +112,7 @@ export function collectEvidence({ output = "", repoPath, since, artifactsDir }) 
     text: all,
     tests: dedupeTests(tests),
     files: files.map((f) => f.file),
+    failedStage: findFailedStage({ output: all, files, job }),
     jobId: (all.match(/jobId[=:"\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i) || all.match(/job[ _-]?id\W+([\w-]{8,})/i) || [])[1] || null,
     jobUrl: (all.match(/https:\/\/[\w.-]*(?:hyperexecute|lambdatest|testmuai)[\w.-]*\/[^\s"')]*job[^\s"')]*/i) || [])[0] || null,
   };
@@ -72,6 +126,93 @@ const excerpt = (text, re, radius = 1) => {
   if (i < 0) return "";
   return lines.slice(Math.max(0, i - radius), i + radius + 1).join("\n").slice(0, 600);
 };
+
+// pre commands live in `pre` or in `preDirectives.commands`
+const preCommands = (js) => js.preDirectives?.commands || js.pre || [];
+const rewritePre = (fn) => (d) => {
+  for (const p of [["pre"], ["preDirectives", "commands"]]) {
+    const cur = d.getIn(p)?.toJSON?.();
+    if (Array.isArray(cur)) d.setIn(p, cur.map((c) => (typeof c === "string" ? fn(c) : c)));
+  }
+};
+const setNode = (version) => (d) => d.set("runtime", { language: "node", version: String(version) });
+
+// Rules for a job that stopped in the pre step. They only see the failed command's own log, and they run
+// before the general rules. A pre failure means no test ran, so it is never a "test failure".
+const PRE_RULES = [
+  {
+    id: "npm-peer-deps", category: "dependencies",
+    re: /npm ERR! code ERESOLVE|ERESOLVE (could not|unable to) resolve/i,
+    title: "npm refused to install: peer dependency conflict (ERESOLVE)",
+    why: "npm 7+ stops when two packages want different versions of a peer dependency; the log names the conflict and suggests --legacy-peer-deps.",
+    fix: (ctx) => {
+      const hit = preCommands(ctx.js).find((c) => /\bnpm (ci|install|i)\b/.test(c) && !/--legacy-peer-deps|--force/.test(c));
+      if (!hit) return null;
+      return { patch: rewritePre((c) => (/--legacy-peer-deps|--force/.test(c) ? c : c.replace(/\bnpm (ci|install|i)\b/, "npm $1 --legacy-peer-deps"))), summary: `Added --legacy-peer-deps to "${hit}" in pre` };
+    },
+    advice: "Or fix the conflict in package.json so a plain install works.",
+  },
+  {
+    id: "npm-too-old", category: "environment",
+    re: /Usage: npm <command>[\s\S]{0,3000}?npm@([0-4]\.\d+|5\.[0-6])\.\d+/,
+    title: "The VM's npm is too old for `npm ci`",
+    why: "The Node version on the VM ships an npm that doesn't know `npm ci`, so npm printed its usage text and exited.",
+    fix: (ctx) => {
+      if (ctx.js.runtime?.language === "node" && parseInt(ctx.js.runtime.version, 10) >= 10) return null;
+      const want = parseInt(ctx.profile?.runtimeVersion, 10) >= 10 ? parseInt(ctx.profile.runtimeVersion, 10) : 18;
+      return { patch: setNode(want), summary: `Set runtime: node ${want}` };
+    },
+    advice: "Pin a current Node version with runtime: {language: node, version: ...}.",
+  },
+  {
+    id: "npm-lock-sync", category: "dependencies",
+    re: /can only install packages when your package\.json and (package-lock\.json|npm-shrinkwrap\.json)[^\n]*in sync|can only install with an existing package-lock\.json|Missing: [^\n]+ from lock file/i,
+    title: "package-lock.json is missing or out of sync, so `npm ci` refused to run",
+    why: "`npm ci` needs a lock file that matches package.json exactly.",
+    fix: (ctx) => (preCommands(ctx.js).some((c) => /\bnpm ci\b/.test(c)) ? { patch: rewritePre((c) => c.replace(/\bnpm ci\b/, "npm install")), summary: "Replaced npm ci with npm install in pre" } : null),
+    advice: "Better: run npm install locally and commit the updated package-lock.json.",
+  },
+  {
+    id: "node-engine", category: "environment",
+    re: /npm ERR! code EBADENGINE|The engine "node" is incompatible with this module/i,
+    title: "A package needs a different Node version than the VM has",
+    why: "The install stopped on an engines check.",
+    fix: (ctx) => {
+      const range = (ctx.text.match(/Expected version "([^"]+)"/) || ctx.text.match(/[Rr]equired:\s*\{[^}]*node:\s*'([^']+)'/) || [])[1];
+      const majors = (range || "").match(/\d+(?=\.|\b)/g)?.map(Number).filter((n) => n >= 8 && n <= 30) || [];
+      if (!majors.length) return null;
+      const want = Math.max(...majors);
+      return String(ctx.js.runtime?.version || "").split(".")[0] === String(want) ? null : { patch: setNode(want), summary: `Set runtime: node ${want} (package requires ${range})` };
+    },
+  },
+  {
+    id: "pre-wrong-directory", category: "paths",
+    re: /Could not open requirements file|npm ERR! (enoent|code ENOENT)[\s\S]{0,400}package\.json|there is no POM in this directory|does not contain a Gradle build|MSB1003|MSB1009/i,
+    title: "The pre command ran in a folder that doesn't have the project file",
+    why: "pre runs from the repo root, but the project file (package.json, pom.xml, requirements.txt…) wasn't found there.",
+    fix: (ctx) => {
+      const root = ctx.profile?.projectRoot || ctx.profile?.installRoot || ctx.profile?.packageRoot;
+      const cmd = ctx.pre.command;
+      if (!root || !cmd || /^\s*cd\s/.test(cmd)) return null;
+      return { patch: rewritePre((c) => (c.trim() === cmd ? `cd ${root} && ${c}` : c)), summary: `Run "${cmd}" from ${root}/` };
+    },
+    advice: "Check the file name and path in the pre command against the repo.",
+  },
+  {
+    id: "pre-command-not-found", category: "environment",
+    re: /^(?:.*?: )?(?:line \d+: )?(?!(?:mvn|gradle|node|npm|npx|python3?|pip3?|dotnet|java):)([\w./-]+): (?:command )?not found\s*$|'([^'\n]+)' is not recognized as an internal or external command/m,
+    title: "The pre step calls a program that isn't on the VM",
+    why: "A command in pre (or a script it runs) isn't installed on the HyperExecute VM.",
+    advice: "Install it earlier in pre, commit the script to the repo, or drop the command.",
+  },
+  {
+    id: "pre-compile", category: "code",
+    re: /COMPILATION ERROR|cannot find symbol|error CS\d{4}|error TS\d{4}/,
+    title: "The project doesn't compile in the pre step",
+    why: "The build in pre failed on a compile error, so no test ran.",
+    advice: "If it compiles on your machine, the VM is probably on a different language version — pin it with runtime. Otherwise fix the code.",
+  },
+];
 
 // fix kinds: {options: {...}} → regenerate with generator options · {patch(doc, js)} → edit YAML in place · none → advice only
 const RULES = [
@@ -221,7 +362,7 @@ const RULES = [
   },
   {
     id: "dependency-download", category: "dependencies",
-    re: /(Could not resolve dependencies|Could not transfer artifact|Failed to read artifact descriptor|npm ERR! (code E|network)|ERR_PNPM_FETCH|No matching distribution found|Could not find a version that satisfies|Unable to load the service index|NU1301)/i,
+    re: /(Could not resolve dependencies|Could not transfer artifact|Failed to read artifact descriptor|npm ERR! (code (E404|E401|E403|E5\d\d|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EINTEGRITY)|network)|ERR_PNPM_FETCH|No matching distribution found|Could not find a version that satisfies|Unable to load the service index|NU1301)/i,
     title: "Dependencies failed to download",
     why: "The pre step couldn't fetch dependencies — a flaky registry, or a private registry the VM can't reach.",
     fix: (ctx) => {
@@ -257,7 +398,7 @@ const RULES = [
   },
   {
     id: "test-failures", category: "tests", stop: true, notYaml: true,
-    re: /(AssertionError|AssertionFailedError|expected:? ?<[^>]*> but was|Tests run: \d+, Failures: [1-9]|\d+ failed(,| \()|FAILED \(failures=|Error: expect\(|✘|NoSuchElementException|ElementNotInteractableException|TimeoutException: .*waiting for)/i,
+    re: /(AssertionError|AssertionFailedError|expected:? ?<[^>]*> but was|Tests run: \d+, Failures: [1-9]|\b[1-9]\d* failed(,| \()|FAILED \(failures=|Error: expect\(|✘|NoSuchElementException|ElementNotInteractableException|TimeoutException: .*waiting for)/i,
     title: "Tests failed on assertions / element lookups",
     why: "The run worked; the tests themselves failed. That's an application or test issue, not the YAML.",
     advice: "Open the failing tests in the HyperExecute dashboard. Rerunning won't fix these — retryOnFailure already covers flaky ones.",
@@ -267,19 +408,31 @@ const RULES = [
 // ---------- diagnosis ----------
 
 export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
-  const text = evidence.text || "";
   const doc = YAML.parseDocument(yamlText || "");
   const js = doc.toJS() || {};
-  const ctx = { text, js, profile, v02: !!v02Name };
+  const tests = evidence.tests || [];
+  // A job that stopped in the pre step never reached the tests: judge it by the pre log, not by test patterns.
+  const pre = evidence.failedStage?.stage === "pre" ? { ...evidence.failedStage } : null;
+  if (pre && !pre.command && pre.step) pre.command = preCommands(js)[pre.step - 1] || null;
+  const ranTests = tests.length > 0 || /(?:Pass|Failed) test stage percentage:\s+(?!0+(?:\.0+)?%)[\d.]+%/i.test(evidence.text || "");
+  const text = pre?.log || evidence.text || "";
+  const ctx = { text, js, profile, v02: !!v02Name, pre };
   const found = [];
-  for (const r of RULES) {
-    if (!r.re.test(text)) continue;
+  for (const r of [...(pre ? PRE_RULES : []), ...RULES]) {
+    if (!r.re.test(text) || (pre && !ranTests && r.notYaml)) continue;
     let fix = null;
     try { fix = r.fix ? r.fix(ctx) : null; } catch { fix = null; }
     found.push({ id: r.id, category: r.category, title: r.title, why: r.why, advice: r.advice || null, evidence: excerpt(text, r.re), fix, stop: !!r.stop, notYaml: !!r.notYaml });
   }
+  if (pre && !found.length) {
+    found.push({
+      id: "pre-step-failed", category: "setup", title: `The pre step failed${pre.command ? `: ${pre.command}` : ""}${pre.remark ? ` (${pre.remark})` : ""}`,
+      why: "The job stopped while setting up the VM, before any test ran — a YAML/environment problem, not a test failure.",
+      advice: pre.log ? "Read failedStage.log, change the pre command (or the runtime/env it needs) in the YAML, then rerun." : "The pre log wasn't downloaded — open the pre stage of the task in the HyperExecute dashboard, or pass the logs folder.",
+      evidence: pre.log ? pre.log.split("\n").slice(-8).join("\n").slice(-600) : "", fix: null, stop: false, notYaml: false,
+    });
+  }
   // Per-test classification when the job produced reports.
-  const tests = evidence.tests || [];
   const classified = tests.length ? classifyTests(tests, { yamlText, profile }) : [];
   if (tests.length) {
     const i = found.findIndex((f) => f.id === "test-failures");
@@ -306,6 +459,7 @@ export function diagnose({ evidence, yamlText, profile, exitCode, v02Name }) {
     status,
     jobId: evidence.jobId,
     jobUrl: evidence.jobUrl,
+    failedStage: pre ? { stage: "pre", step: pre.step, command: pre.command, remark: pre.remark, logFile: pre.file, log: pre.log ? pre.log.slice(-3000) : null } : null,
     diagnoses: found.map(({ fix, ...f }) => ({ ...f, fixSummary: fix?.summary || null, fixType: fix ? (fix.options ? "regenerate" : "patch") : null })),
     canAutoFix: (yamlFixes.length > 0 || yamlTests.some((c) => !c.fix.needsValue)) && !found.some((f) => f.stop && !f.notYaml),
     tests: {
@@ -340,12 +494,16 @@ export function applyDiagnosisFixes(yamlText, diagnosis, ids, values = {}) {
   return { yaml: doc.toString({ lineWidth: 0 }), options, applied };
 }
 
-// Compact log excerpt for the AI when no rule matched: error-looking lines plus the tail.
-export function logDigest(text, max = 6000) {
-  const lines = text.split("\n");
+// Compact log excerpt for the AI when no rule matched: the failed stage's own log first (when known),
+// then error-looking lines plus the tail. Takes the evidence object or plain text.
+export function logDigest(src, max = 6000) {
+  const ev = typeof src === "string" ? { text: src } : src || {};
+  const st = ev.failedStage;
+  const head = st?.log ? `----- failed ${st.stage} step${st.command ? `: ${st.command}` : ""}${st.file ? ` (${st.file})` : ""} -----\n${st.log.slice(-Math.floor(max * 0.6))}\n` : "";
+  const lines = (ev.text || "").split("\n");
   const errs = lines.filter((l) => /\b(error|exception|failed|failure|fatal|denied|not found|timed? ?out|refused|ERR::)\b/i.test(l)).slice(-60);
   const tail = lines.slice(-60);
-  return [...new Set([...errs, "----- tail -----", ...tail])].join("\n").slice(-max);
+  return head + [...new Set([...errs, "----- tail -----", ...tail])].join("\n").slice(-(max - head.length));
 }
 
 export const describeDiagnosis = ({ _fixes, ...d }) => d;

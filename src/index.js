@@ -526,7 +526,7 @@ async function launch(repo, config, attempt, parent, mainConfig = config) {
     try { yamlText = fs.readFileSync(path.resolve(repo, config), "utf8"); } catch {}
     const profile = analyzeRepo(repo);
     rec.diagnosis = diagnose({ evidence, yamlText, profile, exitCode: r.exitCode, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
-    rec.evidence = { files: evidence.files, digest: logDigest(evidence.text) };
+    rec.evidence = { files: evidence.files, digest: logDigest(evidence) };
     rec.status = r.stopped ? "stopped" : rec.diagnosis.status;
     rec.discoveryCheck = checkDiscovery({ repo, yamlPath: mainConfig, yamlText, profile, output: r.output, tests: evidence.tests, targeted: rec.targeted });
     // A green job that ran nothing is the expensive failure — don't report it as passed.
@@ -592,6 +592,7 @@ function runView(rec, tailChars = 3000) {
       rec.status === "running" ? "Call get_hyperexecute_run again in a minute or two." :
       rec.discoveryCheck?.verdict === "zero-tests" && rec.status !== "fixable" ? "The job ran 0 tests. Fix discovery (dry_run_test_discovery, validate_hyperexecute_yaml), then rerun with fix_and_rerun_hyperexecute and yamlContent." :
       rec.status === "fixable" ? "Call fix_and_rerun_hyperexecute with this runId to apply the YAML fixes and start the next attempt." :
+      d?.failedStage && ["unknown", "needs-attention"].includes(rec.status) ? "The pre step failed before any test ran — a YAML/environment problem, not a test failure. Read diagnosis.failedStage (command + log) and logDigest, change the pre command or runtime in the YAML (validate it), then call fix_and_rerun_hyperexecute with yamlContent." :
       rec.status === "fixable-tests" ? "Some tests failed for YAML/environment reasons (see diagnosis.tests.list). Call fix_and_rerun_hyperexecute — it fixes the YAML and reruns only those tests; code failures are left alone." :
       rec.status === "needs-input" ? `Tests need environment values the YAML doesn't have: ${(d?.needsValue || []).join(", ")}. Ask the user for them, then call fix_and_rerun_hyperexecute with values.` :
       rec.status === "test-failures" ? "The tests themselves failed — not a YAML problem. Report them; don't rerun." :
@@ -750,17 +751,18 @@ server.registerTool(
   async ({ repoPath, logText, logPath, yamlPath, write }) => {
     try {
       const repo = resolveRepo(repoPath);
-      let text_ = logText || "";
+      let evidence = collectEvidence({ output: logText || "" });
       if (logPath) {
         const p = path.resolve(repo, logPath);
-        const st = fs.statSync(p);
-        text_ += st.isDirectory() ? collectEvidence({ repoPath: p, since: 1 }).text : fs.readFileSync(p, "utf8");
+        // a folder keeps its structure, so the stage logs (logs/<job>/tasks/<task>/pre) are told apart
+        evidence = fs.statSync(p).isDirectory() ? collectEvidence({ output: logText || "", repoPath: p, since: 1 }) : collectEvidence({ output: (logText || "") + fs.readFileSync(p, "utf8") });
       }
-      if (!text_) throw new Error("Pass logText or logPath.");
+      const text_ = evidence.text;
+      if (!text_.trim()) throw new Error("Pass logText or logPath.");
       const file = path.resolve(repo, yamlPath || "hyperexecute.yaml");
       const yamlText = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
       const profile = analyzeRepo(repo);
-      const d = diagnose({ evidence: collectEvidence({ output: text_ }), yamlText, profile, exitCode: 1, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
+      const d = diagnose({ evidence, yamlText, profile, exitCode: 1, v02Name: v02FrameworkName(profile, profile.primaryFramework) });
       const out = { diagnosis: describeDiagnosis(d) };
       const seen = findLearnedFix({ repo, headline: headline(text_), ruleIds: d.diagnoses.map((x) => x.id) });
       if (seen) out.fixedBefore = { worked: seen.worked, from: seen.from, change: seen.change, note: "This failure was fixed before by this YAML change and the next run passed. Try it first, after checking it fits this YAML." };
@@ -773,7 +775,7 @@ server.registerTool(
         out.applied = r.applied;
         out.fixedYaml = next;
         if (write) { fs.writeFileSync(file, next); out.written = file; }
-      } else if (!d.diagnoses.length) out.logDigest = logDigest(text_);
+      } else if (!d.diagnoses.length || d.failedStage) out.logDigest = logDigest(evidence);
       return text(out);
     } catch (e) {
       return fail(e);
