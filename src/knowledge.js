@@ -1,7 +1,8 @@
 // Local knowledge base: every .md file in ./knowledge (and HE_KB_DIR, if set) is indexed by "## " sections;
 // .yaml/.yml/.txt files (e.g. knowledge/golden/*.yaml) are indexed whole.
 // Confluence pages that were read once are cached in ~/.hyperexecute-studio/kb-cache and searched offline too,
-// as are GitHub gists synced with HE_GISTS (kb-cache/gists, see gists.js).
+// as are GitHub gists synced with HE_GISTS (kb-cache/gists, see gists.js) and TestMu AI docs pages read
+// as a fallback (kb-cache/docs, see docs.js).
 // Search is BM25 with light stemming and HyperExecute synonyms, so "tests not found" also finds "0 tests discovered".
 
 import fs from "node:fs";
@@ -28,7 +29,7 @@ const EMBEDDED = () => globalThis.__HE_KB_FILES__;
 function kbFiles() {
   const out = [];
   for (const dir of KB_DIRS) {
-    const cacheSource = (rel) => (rel.startsWith("gists/") ? "gist" : "confluence-cache");
+    const cacheSource = (rel) => (rel.startsWith("gists/") ? "gist" : rel.startsWith("docs/") ? "testmu-docs" : "confluence-cache");
     const source = dir === KB_CACHE_DIR ? null : "local";
     if (dir === KB_DIRS[0] && EMBEDDED()) {
       for (const f of EMBEDDED()) out.push({ source, rel: f.path, file: f.path, text: f.text });

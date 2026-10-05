@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 {
   const os = await import("node:os");
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off", HE_GISTS: "off" });
+  Object.assign(process.env, { HE_FEEDBACK_DIR: path.join(state, "feedback"), HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "off", HE_GISTS: "off", HE_DOCS: "off" });
 }
 const fx = (n) => path.join(here, "fixtures", n);
 
@@ -463,6 +463,34 @@ check("recognized failures are not saved", !dk.savedForReview, dk);
   fs.writeFileSync(path.join(repo, ".hyperexecute", "scan-ignore"), "# fake keys for tests\nsrc/test/\npy/\n");
   const after = JSON.parse((await call("scan_credentials_and_reporting", { repoPath: repo })).text);
   check("scan-ignore: listed paths skipped and reported, the rest still scanned", before.credentials.some((c) => c.file.startsWith("src/test/")) && !after.credentials.some((c) => c.file.startsWith("src/test/") || c.file.startsWith("py/")) && after.credentials.some((c) => c.file.startsWith("js/")) && /skipped by \.hyperexecute\/scan-ignore/.test(after.summary), after.summary);
+}
+
+// TestMu AI docs as the fallback (a stand-in docs site; its search settings are missing, so the sitemap is used)
+{
+  const os = await import("node:os");
+  const http = await import("node:http");
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "he-docs-"));
+  let pageHits = 0;
+  const site = http.createServer((req, res) => {
+    const base = `http://127.0.0.1:${site.address().port}`;
+    if (req.url === "/support/sitemap.xml") return res.end(`<urlset><url><loc>${base}/support/docs/hyperexecute-zebra-widgets/</loc></url><url><loc>${base}/support/docs/selenium-zebra-other/</loc></url><url><loc>${base}/support/faq/</loc></url></urlset>`);
+    if (req.url === "/support/docs/hyperexecute-zebra-widgets/") { pageHits++; return res.end(`<html><head><title>Zebra Widgets on HyperExecute | TestMu AI (Formerly LambdaTest)</title></head><body><nav>menu</nav><article><div class="theme-doc-markdown markdown"><script type="application/ld+json">{"@context":"https://schema.org"}</script><h1>Zebra Widgets on HyperExecute</h1><p>Set <code>zebraMode: striped</code> to run zebra widgets &amp; friends.</p><h2 id="yaml">YAML</h2><pre class="prism-code language-yaml"><code><span>zebraMode</span><span>: striped</span><br><span>concurrency: 2</span></code></pre><ul><li>Works on linux</li></ul></div></article></body></html>`); }
+    res.statusCode = 404; res.end("not found");
+  });
+  await new Promise((r) => site.listen(0, "127.0.0.1", r));
+  const env = { ...process.env, HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_DOCS: "", HE_DOCS_SITE: `http://127.0.0.1:${site.address().port}`, HE_GISTS: "off" };
+  await client.close();
+  await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));
+  let k = JSON.parse((await call("search_knowledge_base", { query: "zebra widgets striped" })).text);
+  const d0 = k.docs?.results?.[0];
+  check("docs fallback: used when the knowledge base has no answer; page as Markdown with its URL", d0?.title === "Zebra Widgets on HyperExecute" && /\/support\/docs\/hyperexecute-zebra-widgets\/$/.test(d0.url) && /```yaml\nzebraMode: striped\nconcurrency: 2\n```/.test(d0.text) && /- Works on linux/.test(d0.text) && /`zebraMode: striped`/.test(d0.text) && /widgets & friends/.test(d0.text) && !/schema\.org|menu/.test(d0.text) && k.docs.via === "sitemap", JSON.stringify(k.docs).slice(0, 700));
+  k = JSON.parse((await call("search_knowledge_base", { query: "v0.2 testDiscovery 0 tests" })).text);
+  check("docs fallback: not used when the knowledge base answers", !k.docs && k.local.length > 0, JSON.stringify(Object.keys(k)));
+  k = JSON.parse((await call("search_knowledge_base", { query: "zebra widgets", source: "local" })).text);
+  check("docs fallback: the page is cached and found locally next time", k.local?.[0]?.source === "testmu-docs" && /Zebra Widgets/.test(k.local[0].section + k.local[0].text) && pageHits === 1, JSON.stringify(k.local?.[0] || k).slice(0, 300));
+  const st = JSON.parse((await call("knowledge_base_status", {})).text);
+  check("docs fallback: shown in knowledge_base_status", st.testmuDocs?.enabled && st.testmuDocs.cachedPages === 1, JSON.stringify(st.testmuDocs));
+  site.close();
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");

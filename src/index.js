@@ -25,6 +25,7 @@ import { generatePipeline, CI_SYSTEMS } from "./pipelines.js";
 import { withLearned, recordChoice, saveSuccessCase, readTeamMemory, rememberForTeam, recordTeamPass, recordFixThatWorked, findLearnedFix, TEAM_FILE, TEAM_OPTIONS } from "./learning.js";
 import { buildSetupReport } from "./report.js";
 import { syncGists, gistsStatus, gistSources } from "./gists.js";
+import { searchDocs, docsStatus, localIsWeak } from "./docs.js";
 
 // Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
 const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
@@ -47,6 +48,7 @@ Rules that matter:
 - Learning from what worked: when a fix makes the next run pass, the failure and the YAML change are remembered automatically (this machine + the repo's team memory). When get_hyperexecute_run or diagnose_hyperexecute_logs returns fixedBefore, try that change first if it fits the YAML.
 - When the user states a lasting decision for this repo ("always win11", "use the ci profile", "staging needs the tunnel") or corrects the YAML in a way that should stick, call remember_for_team so every teammate's agent gets it.
 - Grid connection: generate_lambdatest_capabilities finds where the repo connects. Tell the user those file:line locations; change the existing code in place only when asked. Never create a new helper or connection file.
+- When search_knowledge_base returns docs results (public TestMu AI docs, the fallback when the knowledge base has no good answer), answer from them and cite the page URL.
 - Knowledge results with source "gist" are field examples from real customer setups (HE_GISTS): reuse their patterns (discovery scripts, pre steps, runTest.sh), but check against the docs and this repo, and never copy another customer's names, URLs or values.
 - search_knowledge_base for special requirements (tunnel, reports, secrets, mobile, a framework you are unsure about) before generating.`;
 
@@ -278,17 +280,18 @@ server.registerTool(
   {
     title: "Search HyperExecute knowledge base",
     description:
-      "Search HyperExecute knowledge: bundled YAML reference, framework recipes, troubleshooting, golden example YAMLs (knowledge/golden), cached Confluence pages, and live Confluence (HYP) when credentials are set. Understands synonyms (\"tests not found\" ≈ \"0 tests discovered\"). USE before generating for special requirements (tunnel, reports, secrets, mobile, tags) and when a diagnosis is unknown. Example: {query:\"cucumber tags gradle\"}.",
+      "Search HyperExecute knowledge: bundled YAML reference, framework recipes, troubleshooting, golden example YAMLs (knowledge/golden), the team's gist setups, cached Confluence pages, and live Confluence (HYP) when credentials are set. When none of that answers well, it also searches the public TestMu AI docs (testmuai.com/support/docs) and returns the matching pages' text with their URLs (source \"docs\" to search them directly). Understands synonyms (\"tests not found\" ≈ \"0 tests discovered\"). USE before generating for special requirements (tunnel, reports, secrets, mobile, tags) and when a diagnosis is unknown. Keyword queries work best. Example: {query:\"cucumber tags gradle\"}.",
     inputSchema: {
       query: z.string(),
-      source: z.enum(["all", "local", "confluence"]).optional().describe("Default all"),
+      source: z.enum(["all", "local", "confluence", "docs"]).optional().describe("Default all (TestMu AI docs only when the rest has no good answer); docs = the public TestMu AI docs only"),
       limit: z.number().int().min(1).max(20).optional(),
     },
   },
   async ({ query, source = "all", limit = 6 }) => {
     const out = {};
-    if (source !== "confluence") out.local = searchKnowledge(query, limit).map(({ topic, section, text, source, score }) => ({ topic, section, source, score, text: text.slice(0, 4000) }));
-    if (source !== "local") {
+    const local = source === "all" || source === "local" ? searchKnowledge(query, limit) : [];
+    if (source === "all" || source === "local") out.local = local.map(({ topic, section, text, source, score }) => ({ topic, section, source, score, text: text.slice(0, 4000) }));
+    if (source === "all" || source === "confluence") {
       const cfg = confluenceConfig();
       if (!cfg.configured) out.confluence = { configured: false, note: "Set ATLASSIAN_EMAIL + ATLASSIAN_API_TOKEN in the MCP server env to search Confluence." };
       else {
@@ -298,6 +301,15 @@ server.registerTool(
         } catch (e) {
           out.confluence = { error: e.message, note: `Local results include ${cacheStatus().pages} cached Confluence page(s).` };
         }
+      }
+    }
+    // not answered well above → the public TestMu AI docs
+    if (source === "docs" || (source === "all" && localIsWeak(local, query) && !out.confluence?.results?.length)) {
+      try {
+        out.docs = await searchDocs(query, { limit: Math.min(limit, 3) });
+        if (out.docs.results.length) out.docs.note = "From the public TestMu AI docs: cite the page URL when you use it. Pages are cached, so later searches find them locally.";
+      } catch (e) {
+        out.docs = { error: e.message };
       }
     }
     return text(out);
@@ -370,7 +382,7 @@ server.registerTool(
         confluence.connection = e.message;
       }
     }
-    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), gists: { sources: gistSources() || "off", ...gistsStatus() }, confluence });
+    return text({ localKnowledgeDirs: KB_DIRS, localTopics: listTopics(), confluenceCache: cacheStatus(), gists: { sources: gistSources() || "off", ...gistsStatus() }, testmuDocs: docsStatus(), confluence });
   }
 );
 

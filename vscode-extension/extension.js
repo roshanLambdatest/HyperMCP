@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -598,8 +598,18 @@ class Studio {
     this.cts = new vscode.CancellationTokenSource();
     try {
       // Knowledge: bundled notes + Confluence
-      const kb = c.searchKnowledge(`${text} ${this.state.result?.framework || ""}`, 3).map((d) => ({ source: "bundled", title: `${d.topic} › ${d.section}`, text: d.text.slice(0, 1500) }));
+      const local = c.searchKnowledge(`${text} ${this.state.result?.framework || ""}`, 3);
+      const kb = local.map((d) => ({ source: "bundled", title: `${d.topic} › ${d.section}`, text: d.text.slice(0, 1500) }));
       const sources = [];
+      // nothing good locally → the public TestMu AI docs
+      if (c.localIsWeak(c.searchKnowledge(text, 1), text)) {
+        try {
+          for (const d of (await c.searchDocs(text, { limit: 2 })).results.filter((r) => r.text)) {
+            kb.push({ source: "testmu-docs", title: d.title, text: d.text });
+            sources.push({ title: d.title, url: d.url });
+          }
+        } catch {}
+      }
       if (this.state.meta.confluence) {
         try {
           const hits = await c.searchConfluence(`${this.state.result?.framework || ""} ${text}`.trim(), { limit: 4 });
