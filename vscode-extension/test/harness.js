@@ -94,6 +94,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   await send({ type: "ready" });
   let s = lastState();
   check("analyzed + generated", s?.profile && s.yaml.includes("version:"), s?.error);
+  check("timeline: the analysis shows in the chat", s.chat.some((m) => m.role === "event" && /^Analyzed /.test(m.text) && m.pane === "setup"), JSON.stringify(s.chat));
   console.log(`  framework=${s.result.framework} v${s.result.yamlVersion} split=${s.result.splitBy} backend=${s.meta.backend}`);
 
   await send({ type: "setOptions", options: { runson: "win", concurrency: 8 } });
@@ -106,6 +107,20 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   console.log("  assistant:", reply.text, "|", reply.applied, "|", reply.backend);
   check("chat applied changes", !reply.error && /YAML regenerated|edited directly/.test(reply.applied || ""), JSON.stringify(reply));
   console.log(s.yaml.split("\n").slice(0, 40).join("\n"));
+  const ch = reply.change;
+  if (!reply.applied) console.log("SKIP  change details and undo: the chat request applied nothing (set PROMPT for this fixture)");
+  else {
+  check("chat shows what changed, why, the diff and validation", ch && ch.changes.length && ch.changes.every((c) => c.why) && ch.diff.added + ch.diff.removed > 0 && ch.check, JSON.stringify(ch)?.slice(0, 600));
+
+  const beforeUndo = s.yaml;
+  await send({ type: "chat", text: "undo" });
+  s = lastState();
+  check("undo restores the YAML from before the chat change", s.yaml !== beforeUndo && /runson: win\b/.test(s.yaml) && /concurrency: 8/.test(s.yaml) && s.chat.find((m) => m.change?.id === ch.id)?.change.undone, s.chat[s.chat.length - 1]?.text);
+  await send({ type: "chat", text: "undo" });
+  check("nothing left to undo", /Nothing to undo/.test(lastState().chat.at(-1).text));
+  await send({ type: "chat", text: process.env.PROMPT || "Run on windows 11 with 12 VMs, split by scenario, add tunnel, 2 retries" });
+  s = lastState();
+  }
 
   await send({ type: "dryRun" });
   const dr = [...posted].reverse().find((m) => m.type === "dryRun");
@@ -118,6 +133,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
 
   await send({ type: "save" });
   check("saved to repo", fs.existsSync(path.join(tmpRepo, "hyperexecute.yaml")));
+  check("timeline: the save shows in the chat, undo doesn't add a line", lastState().chat.some((m) => m.role === "event" && m.text === "Saved the YAML") && !lastState().chat.some((m) => m.role === "event" && /Undid/.test(m.text)));
   if (process.env.FIXTURE === "creds") {
     s = lastState();
     check("scan: 13 credentials, reporting found", s.scan.credentials.length === 13 && s.scan.reporting.length >= 3, s.scan.summary);

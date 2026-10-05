@@ -48,14 +48,18 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   const { generateYaml } = await import("../../src/generator.js");
 
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
+  // BASE_PATH=/HyperMCP/ serves the site under a sub-path, the way GitHub Pages does for a project site
+  const base = process.env.BASE_PATH || "/";
   const server = http.createServer((req, res) => {
-    const rel = new URL(req.url, "http://x").pathname;
+    const full = new URL(req.url, "http://x").pathname;
+    if (!full.startsWith(base)) { res.writeHead(404); return res.end(); }
+    const rel = "/" + full.slice(base.length);
     const file = path.join(dist, rel === "/" ? "index.html" : rel);
     if (!fs.existsSync(file)) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
     res.end(fs.readFileSync(file));
   }).listen(0);
-  const url = `http://127.0.0.1:${server.address().port}/`;
+  const url = `http://127.0.0.1:${server.address().port}${base}`;
 
   const browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ["--no-sandbox"], protocolTimeout: 120000 });
   const page = await browser.newPage();
@@ -74,7 +78,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
     if (r.method() === "OPTIONS") return r.respond({ status: 204, headers: cors });
     anthropic.push({ url: u, headers: r.headers(), body: r.postData() ? JSON.parse(r.postData()) : null });
     if (u.includes("/v1/models/")) return r.respond({ status: 200, headers: cors, contentType: "application/json", body: JSON.stringify({ id: "claude-opus-5-5", type: "model", display_name: "Claude Opus 5.5" }) });
-    const plan = { reply: "Set 7 VMs, as asked.", action: "update_options", options: { yamlVersion: null, runson: null, runsonMatrix: null, executionMode: null, splitBy: null, concurrency: 7, retryOnFailure: null, maxRetries: null, globalTimeout: null, matrixValues: null, extraMatrix: null, extraEnv: null, extraPre: null, tunnel: null, mavenProfile: null }, yaml: null };
+    const plan = { reply: "Set 7 VMs, as asked.", action: "update_options", options: { yamlVersion: null, runson: null, runsonMatrix: null, executionMode: null, splitBy: null, concurrency: 7, retryOnFailure: null, maxRetries: null, globalTimeout: null, matrixValues: null, extraMatrix: null, extraEnv: null, extraPre: null, tunnel: null, mavenProfile: null }, yaml: null, explanations: [{ key: "concurrency", why: "Seven VMs, one per test class you asked to run side by side." }] };
     r.respond({ status: 200, headers: cors, contentType: "application/json", body: JSON.stringify({ id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: JSON.stringify(plan) }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 } }) });
   });
   const requests = [];
@@ -116,6 +120,13 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   await page.select("#o-mvnp", "smoke");
   await page.waitForFunction(() => document.querySelector("#yaml").value.includes("-Psmoke"));
   check("option bar: Maven profile → -Psmoke", true);
+  const events = () => page.$$eval("#msgs .event", (e) => e.map((x) => x.innerText));
+  check("timeline: the analysis shows in the chat", (await events()).some((t) => /Analyzed maven-profiles/.test(t)), (await events()).join("\n"));
+  await page.select("#o-os", "win");
+  await page.select("#o-retry", "2");
+  await page.waitForFunction(() => document.querySelector("#yaml").value.includes("maxRetries: 2"));
+  const bar = (await events()).filter((t) => /Changed in the option bar/.test(t));
+  check("timeline: option-bar changes are one line, with why each matters", bar.length === 1 && /mavenProfile/.test(bar[0]) && /runson → win/.test(bar[0]) && /maxRetries → 2/.test(bar[0]) && (await page.$$eval("#msgs .event .ev-why", (e) => e.at(-1)?.textContent || "")).includes("retried"), bar.join("\n---\n"));
 
   // ---------- chat ----------
   await load("maven-testng");
@@ -123,6 +134,7 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   let y = await yaml();
   check("chat: 'Windows 11, 10 VMs, tunnel' changes the YAML", /runson: win11/.test(y) && /concurrency: 10/.test(y) && /tunnel: true/.test(y) && /Windows 11/.test(r), r);
   check("chat: unfilled value explained as a to-do with a chip", /Almost ready/.test(r) && /Set BASE_URL/.test(r), r);
+  check("chat: each change says why it matters, with the YAML diff", /concurrency/.test(r) && /VMs run tasks at the same time/.test(r) && /YAML diff/.test(r), r);
   r = await ask("undo");
   check("chat: undo", /runson: linux/.test(await yaml()) && /Undone/.test(r), r);
   r = await ask("BASE_URL=https://staging.example.com");
@@ -177,6 +189,8 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   check("claude: model, fallbacks, JSON-schema output", req && req.body.model === "claude-opus-5-5" && req.body.fallbacks === "default" && req.body.output_config?.format?.type === "json_schema" && req.body.output_config.effort === "low", JSON.stringify(req?.body)?.slice(0, 600));
   check("claude: no source files sent (summary + YAML only)", req && !JSON.stringify(req.body).includes("public class LoginTest"), "source leaked");
   check("claude: its plan is applied (7 VMs) and labelled", /concurrency: 7/.test(await yaml()) && /via Claude/.test(r), r);
+  check("claude: its explanation is shown for the change", /one per test class you asked/.test(r), r);
+  check("claude: schema asks for explanations; activity is sent", req && req.body.output_config.format.schema.required.includes("explanations") && /Analyzed maven-testng/.test(JSON.stringify(req.body.messages)), JSON.stringify(req?.body)?.slice(0, 400));
   check("claude: its code loads only now, as a separate file", requests.some((u) => /chunks\/claude-/.test(u)));
 
   // ---------- usual settings, existing YAML, report ----------
@@ -279,6 +293,15 @@ const stripHeader = (y) => y.split("\n").filter((l) => !l.startsWith("#") && l !
   const external = requests.filter((u) => !u.startsWith(url));
   check("network: only LambdaTest, GitHub (import) and opt-in Anthropic", external.every((u) => /^https:\/\/(api\.(lambdatest|anthropic|github)\.com|raw\.githubusercontent\.com)\//.test(u)), external.join("\n"));
   check("no page errors or CSP violations", !errors.length, errors.join("\n"));
+
+  // hosts like GitHub Pages can't send frame-ancestors, so the page itself refuses to run in a frame
+  const framer = await browser.newPage();
+  await framer.setContent(`<iframe src="${url}" width="800" height="600"></iframe>`);
+  await wait(1500);
+  const inner = await (await framer.$("iframe")).contentFrame();
+  const framedText = await inner.evaluate(() => document.body.innerText);
+  check("refuses to run inside another site's frame", /can't run inside another page/.test(framedText) && !(await inner.$("#views")), framedText.slice(0, 300));
+  await framer.close();
 
   await browser.close();
   server.close();

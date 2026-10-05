@@ -38,3 +38,5 @@ node test/e2e.js  # real Chrome: parity with the Node core, chat, Claude request
 ## Hosting
 
 `dist/` is a handful of static files. Put them on any static host (an internal CDN, S3 + CloudFront, Netlify, GitHub Pages from a repo the customers may see). No server-side code, no environment variables, no data stored.
+
+**GitHub Pages:** `.github/workflows/pages.yml` builds the site, runs `test/e2e.js` under the Pages sub-path (`BASE_PATH=/HyperMCP/`) and deploys on every push to `main` that touches the web app or the core. Turn it on once in the repo's Settings → Pages → Source: "GitHub Actions". Pages can't send custom headers, so `netlify.toml`'s headers don't apply there: the page sets its own referrer policy and refuses to run inside another site's frame; `nosniff` and `Permissions-Policy` are not sent (low risk for a page that serves no uploaded files and asks for no device access). Pages caches every file for 10 minutes, so a deploy can take that long to reach visitors.

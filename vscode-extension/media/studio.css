@@ -89,7 +89,32 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .msg .applied.bad { color: var(--warn); }
 .msg a { color: var(--link); cursor: pointer; text-decoration: none; }
 .msg a:hover { text-decoration: underline; }
+.msg .applied s { color: var(--muted); }
+.change { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; white-space: normal; }
+.change.undone { opacity: 0.55; }
+.change .why { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 4px; }
+.change .why .from { color: var(--muted); text-decoration: line-through; }
+.change .why .muted { color: var(--muted); }
+.change .diff summary { cursor: pointer; color: var(--muted); }
+.change .diff pre { margin: 4px 0 0; padding: 6px 8px; max-height: 260px; overflow: auto; background: var(--editor-bg); border: 1px solid var(--border); border-radius: 4px; font-family: var(--mono); font-size: 11px; white-space: pre; }
+.change .add { color: var(--ok); }
+.change .del { color: var(--err); }
+.change .gap { color: var(--muted); }
+.change .ck.ok { color: var(--ok); }
+.change .ck.bad { color: var(--err); }
+.change .ck ul { margin: 2px 0 4px; padding-left: 16px; color: var(--fg); }
 .msg .meta { margin-top: 6px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.event { align-self: stretch; display: flex; align-items: baseline; gap: 6px; padding: 2px 4px; font-size: 11px; color: var(--muted); border-left: 2px solid var(--border); }
+.event.go { cursor: pointer; }
+.event.go:hover { background: rgba(127, 127, 127, 0.08); }
+.event .ic { width: 10px; text-align: center; flex: none; }
+.event .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.event .what b { color: var(--fg); font-weight: 600; }
+.event .what a { color: var(--link); cursor: pointer; text-decoration: none; }
+.event .at { flex: none; font-size: 10.5px; }
+.event.ok { border-left-color: var(--ok); } .event.ok .ic { color: var(--ok); }
+.event.warn { border-left-color: var(--warn); } .event.warn .ic { color: var(--warn); }
+.event.bad { border-left-color: var(--err); } .event.bad .ic { color: var(--err); }
 .empty { color: var(--muted); font-size: 12px; text-align: center; margin: auto 0; padding: 12px 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 10px 8px; }
 .chip { border: 1px solid var(--border); background: transparent; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; text-align: left; }

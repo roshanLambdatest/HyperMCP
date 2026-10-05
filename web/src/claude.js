@@ -13,7 +13,7 @@ const str = { type: "string" };
 const PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["reply", "action", "options", "yaml"],
+  required: ["reply", "action", "options", "yaml", "explanations"],
   properties: {
     reply: { type: "string", description: "Answer to the user in 1-5 short sentences or a short list. Plain words; `code` for keys and commands." },
     action: { type: "string", enum: ["update_options", "replace_yaml", "answer_only"] },
@@ -41,6 +41,11 @@ const PLAN_SCHEMA = {
       },
     },
     yaml: nullable({ type: "string", description: "The COMPLETE replacement YAML, only when action is replace_yaml." }),
+    explanations: {
+      type: "array",
+      description: "One entry per changed option (or YAML key for replace_yaml): why it matters on HyperExecute, one sentence. Empty for answer_only.",
+      items: { type: "object", additionalProperties: false, required: ["key", "why"], properties: { key: str, why: str } },
+    },
   },
 };
 
@@ -60,6 +65,8 @@ Rules:
 - Tags go in matrixValues with splitBy "tag".
 - Never put a secret value in the YAML yourself; use \${{ .secrets.NAME }} references.
 - If a request is ambiguous, take the sensible default and say what you assumed. Don't invent HyperExecute keys; if you're not sure a key exists, say so.
+- explanations: for every option or YAML key you change, one plain sentence on what it does on HyperExecute and why it fits their request, so they learn the YAML. Use the option name as key (or the YAML key for replace_yaml).
+- CONTEXT.activity lists what the customer did on the page (analysis, option-bar changes, downloads); use it when they ask what changed.
 - Keep "reply" short and specific to their repo.`;
 
 export async function askClaude({ apiKey, context, history, text }) {
@@ -93,8 +100,9 @@ function toPlan(p) {
     else if (k === "extraEnv") options.extraEnv = Object.fromEntries(v.map((x) => [x.name, x.value]));
     else options[k] = v;
   }
-  if (p.action === "replace_yaml" && p.yaml) return { reply: p.reply, yaml: p.yaml };
-  if (p.action === "update_options" && Object.keys(options).length) return { reply: p.reply, options };
+  const explanations = p.explanations || [];
+  if (p.action === "replace_yaml" && p.yaml) return { reply: p.reply, yaml: p.yaml, explanations };
+  if (p.action === "update_options" && Object.keys(options).length) return { reply: p.reply, options, explanations };
   return { reply: p.reply };
 }
 

@@ -42,6 +42,7 @@ const PlanSchema = z.object({
   }).describe("Only set fields that should change; null = keep current value."),
   resetOptions: z.array(z.string()).describe("Option names to clear back to default."),
   yaml: z.string().nullable().describe("Full replacement YAML, only when action is replace_yaml."),
+  explanations: z.array(z.object({ key: z.string(), why: z.string() })).describe("One entry per changed option (or YAML key for replace_yaml): why it matters on HyperExecute, one sentence. Empty for answer_only."),
 });
 const { $schema, ...PLAN_JSON_SCHEMA } = z.toJSONSchema(PlanSchema); // the claude CLI rejects the draft-2020-12 $schema header
 
@@ -62,6 +63,8 @@ Rules:
 - Tag lists (e.g. @smoke, regression) go in matrixValues with splitBy "tag".
 - "Optimize" requests: use CONTEXT.optimizerSuggestions — apply them via options where possible (splitBy, yamlVersion, concurrency, retries) or replace_yaml for the rest; mention what you applied.
 - Questions about credentials or customer reporting: answer from CONTEXT.repoScan and point to the Setup tab, where hard-coded credentials can be replaced with env vars.
+- CONTEXT.history mixes chat turns with "event" entries: things the user did in the Studio (saved the YAML, started a run, a run finished with its status and diagnosis, fixes applied). Use them to answer "why did it fail?" or "what did we change?".
+- explanations: for every option or YAML key you change, one plain sentence on what it does on HyperExecute and why it fits this request, so the user learns the YAML. Use the option name as key (or the YAML key for replace_yaml).
 - Keep "reply" to 1-4 sentences, plain text. Mention the Confluence page title when you relied on it. If the request is ambiguous, pick the sensible default and say what you assumed.`;
 
 // ---------- backends ----------
@@ -135,7 +138,9 @@ function extractJson(text) {
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("Model did not return JSON.");
-  return PlanSchema.parse(JSON.parse(s.slice(start, end + 1)));
+  const obj = JSON.parse(s.slice(start, end + 1));
+  obj.explanations ??= []; // models without schema enforcement sometimes leave it out
+  return PlanSchema.parse(obj);
 }
 
 // ---------- offline rules ----------
@@ -180,6 +185,7 @@ function rulesPlan(text) {
     options: o,
     resetOptions: [],
     yaml: null,
+    explanations: [],
   };
 }
 
@@ -218,7 +224,7 @@ async function plan(context, promptContext, userText, token) {
     default:
       result = rulesPlan(userText);
   }
-  return { plan: PlanSchema.parse(result), backend: LABELS[backend.name] || backend.name };
+  return { plan: PlanSchema.parse({ explanations: [], ...result }), backend: LABELS[backend.name] || backend.name };
 }
 
 module.exports = { plan, detectBackend, rulesPlan, LABELS };

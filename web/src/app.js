@@ -12,6 +12,13 @@ import { SAMPLES } from "./samples.gen.js";
 import "./kb.gen.js"; // customer-safe knowledge base, embedded at build time
 import { searchKnowledge } from "../../src/knowledge.js";
 
+// frame-ancestors can only be sent as a header, which GitHub Pages can't do: refuse to run inside
+// another site's frame (clickjacking), wherever the page is hosted.
+if (window.top !== window.self) {
+  document.body.textContent = "HyperExecute Studio can't run inside another page. Open it directly.";
+  throw new Error("framed");
+}
+
 const REPORT_URL = "https://github.com/roshanLambdatest/HyperMCP/issues/new";
 
 const VERSION = __STUDIO_VERSION__;
@@ -69,6 +76,7 @@ function toast(text) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
 }
 function download(name, data, type = "text/plain") {
+  if (S.chat) say("event", `Downloaded ${name}`);
   const url = URL.createObjectURL(new Blob([data], { type }));
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   document.body.append(a);
@@ -286,6 +294,9 @@ function analyze() {
   Object.assign(S, { options: {}, history: [], chat: [], opt: null, diag: null, logs: "", capsResult: null, tab: "checks", view: "chat", fileName: null });
   regenerate();
   workspace();
+  const t = S.summary.tests || {};
+  const found = [["class", t.classCount], ["spec file", t.fileCount], ["scenario", t.scenarioCount], ["test function", t.functionCount]].filter(([, n]) => n).map(([w, n]) => plural(n, w))[0];
+  S.chat.push({ role: "event", text: `Analyzed ${S.repoName}`, detail: [S.result?.framework || "no framework found", found, S.scan.credentials.length ? plural(S.scan.credentials.length, "hard-coded credential") : ""].filter(Boolean).join(" · "), tone: S.scan.credentials.length ? "warn" : "" });
   const w = welcome(context());
   const existing = (S.profile.existingHyperExecuteYamls || []).slice(0, 3);
   if (existing.length) {
@@ -329,6 +340,13 @@ function notes() {
 }
 
 // options changes, from the bar or the chat; returns the list of problems (empty = ok)
+// what a change did, for the chat: each option with why it matters (Claude's words when it gave them), and the YAML diff
+const mark = () => ({ options: structuredClone(S.options), yaml: S.yaml });
+const describeChange = (before, explanations = []) => {
+  let changes = core.optionChanges(before.options, S.options, explanations);
+  if (!changes.length) changes = (explanations || []).filter((e) => e?.key && e?.why).map((e) => ({ key: e.key, why: e.why }));
+  return { changes, diff: core.lineDiff(before.yaml, S.yaml) };
+};
 function snapshot() { S.history.push({ options: structuredClone(S.options), yaml: S.yaml, generated: S.generated, dirty: S.dirty }); if (S.history.length > 30) S.history.shift(); }
 function applyOptions(patch) {
   const before = S.options;
@@ -413,16 +431,17 @@ async function send(text) {
 async function act(plan, text) {
   if (plan.diagnose) return diagnoseInChat(plan.diagnose);
   if (plan.undo) return say("bot", undo() ? "Undone. The YAML is back to how it was." : "There's nothing to undo.");
-  if (plan.reset) { snapshot(); S.options = {}; regenerate(); renderAll(); return say("bot", "Back to the detected defaults.", { chips: [{ label: "Undo", send: "undo", icon: "undo" }] }); }
+  if (plan.reset) { const b = mark(); snapshot(); S.options = {}; regenerate(); renderAll(); return say("bot", "Back to the detected defaults.", { chips: [{ label: "Undo", send: "undo", icon: "undo" }], change: describeChange(b) }); }
   if (plan.optimize) return optimizeInChat();
   if (plan.pipeline) return pipelineInChat(plan.pipeline);
-  if (plan.options) return changeInChat(plan.options, plan.done || [], plan.reply);
+  if (plan.options) return changeInChat(plan.options, plan.done || [], plan.reply, plan.explanations);
   if (plan.yaml) {
+    const b = mark();
     snapshot();
     Object.assign(S, { yaml: plan.yaml, dirty: true });
     validate();
     renderAll();
-    return say("bot", `${plan.reply || "I rewrote the YAML."}\n\n${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }], via: S.ai.on ? "Claude" : null });
+    return say("bot", `${plan.reply || "I rewrote the YAML."}\n\n${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }], via: S.ai.on ? "Claude" : null, change: describeChange(b, plan.explanations) });
   }
   if (plan.ai && S.ai.on && S.ai.key) return askAi(text);
   if (plan.tab) openTab(plan.tab);
@@ -441,15 +460,16 @@ function checkLine() {
   return v.warnings.length ? `The YAML is valid, with ${plural(v.warnings.length, "warning")} under Checks.` : "The YAML is valid.";
 }
 
-function changeInChat(patch, done, reply) {
-  const oldLines = S.yaml.split("\n");
+function changeInChat(patch, done, reply, explanations) {
+  const b = mark();
   const r = applyOptions(patch);
   if (r.error) return say("bot", `I couldn't apply that: ${r.error}`, { error: true });
   renderAll();
-  const changed = S.yaml.split("\n").filter((l, i) => l !== oldLines[i]).length;
+  const change = describeChange(b, explanations);
+  const changed = change.diff.added + change.diff.removed;
   const what = reply || `Done: ${done.join(" · ")}.`;
   const fill = placeholders().slice(0, 2).map((x) => ({ label: `Set ${x}`, prefill: `${x}=`, primary: true }));
-  say("bot", `${what}${r.hadEdits ? "\n\nYour hand edits were replaced by the rebuilt YAML; say **undo** to get them back." : ""}\n\n${checkLine()}${changed ? "" : " Nothing in the YAML changed."}`, { chips: [...fill, { label: "Undo", send: "undo", icon: "undo" }, { label: "Explain this YAML", send: "Explain this YAML" }], via: reply && S.ai.on ? "Claude" : null });
+  say("bot", `${what}${r.hadEdits ? "\n\nYour hand edits were replaced by the rebuilt YAML; say **undo** to get them back." : ""}\n\n${checkLine()}${changed ? "" : " Nothing in the YAML changed."}`, { chips: [...fill, { label: "Undo", send: "undo", icon: "undo" }, { label: "Explain this YAML", send: "Explain this YAML" }], via: reply && S.ai.on ? "Claude" : null, change });
   if (S.view === "chat" && window.innerWidth > 960) flashYaml();
 }
 function flashYaml() { const e = $(".editor"); if (!e) return; e.animate?.([{ boxShadow: "inset 0 0 0 2px var(--brand)" }, { boxShadow: "inset 0 0 0 0 transparent" }], { duration: 700 }); }
@@ -494,11 +514,12 @@ async function askAi(text) {
       yaml: S.yaml,
       checks: { errors: S.validation?.errors, warnings: S.validation?.warnings },
       scan: S.scan?.summary,
+      activity: S.chat.filter((m) => m.role === "event").slice(-8).map((m) => `${m.text}${m.detail ? `: ${m.detail}` : ""}${m.change?.changes.length ? ` (${m.change.changes.map((c) => `${c.key} ${c.from} → ${c.to}`).join("; ")})` : ""}`),
     };
     const history = S.chat.slice(0, -1).filter((m) => (m.role === "me" || m.role === "bot") && !m.log).map((m) => ({ role: m.role === "me" ? "user" : "assistant", text: m.text }));
     const plan = await askClaude({ apiKey: S.ai.key, context: ctx, history, text });
     S.busy = false;
-    if (plan.options) return changeInChat(plan.options, [], plan.reply);
+    if (plan.options) return changeInChat(plan.options, [], plan.reply, plan.explanations);
     await act(plan, text);
     const last = S.chat.at(-1);
     if (last && last.role === "bot") { last.via = "Claude"; renderChat(); }
@@ -508,12 +529,31 @@ async function askAi(text) {
   }
 }
 
+// what a change did: each option (old → new) with why it matters, then the YAML diff (collapsed)
+const openDiffs = new Set();
+let changeSeq = 0;
+function changeHtml(ch, withDiff = true) {
+  if (!ch) return "";
+  ch.id ||= ++changeSeq;
+  const why = ch.changes.length ? `<ul class="why">${ch.changes.map((c) => `<li><code>${esc(c.key)}</code>${c.from !== undefined ? ` <span class="from">${esc(c.from)}</span> → <b>${esc(c.to)}</b>` : ""}${c.why ? `<div class="muted">${esc(visitor(c.why))}</div>` : ""}</li>`).join("")}</ul>` : "";
+  const d = ch.diff;
+  const diff = withDiff && d && (d.added || d.removed)
+    ? `<details class="diff" data-id="${ch.id}"${openDiffs.has(ch.id) ? " open" : ""}><summary>YAML diff <span class="add">+${d.added}</span> <span class="del">−${d.removed}</span></summary><pre>${d.lines.map((l) => `<span class="${l.op === "+" ? "add" : l.op === "-" ? "del" : l.op === "…" ? "gap" : ""}">${l.op === "…" ? "  ⋯" : esc(l.op + " " + l.text)}</span>`).join("\n")}${d.truncated ? "\n  ⋯ (the rest is in the editor)" : ""}</pre></details>`
+    : "";
+  return why || diff ? `<div class="change">${why}${diff}</div>` : "";
+}
+
 function renderChat() {
   const box = $("#msgs");
   if (!box) return;
   box.innerHTML = S.chat.map((m) => {
+    if (m.role === "event") {
+      const ic = { ok: "✓", warn: "!", bad: "✕" }[m.tone] || "•";
+      const why = m.change?.changes.length ? `<details class="ev-why"><summary>Why it matters</summary>${changeHtml(m.change, false)}</details>` : "";
+      return `<div class="event ${esc(m.tone || "")}"><span class="ic">${ic}</span><div class="what"><b>${esc(m.text)}</b>${m.detail ? ` · ${esc(m.detail)}` : ""}${why}</div></div>`;
+    }
     if (m.role === "me") return `<div class="msg me"><div class="body${m.log ? " log" : ""}">${esc(m.text)}</div></div>`;
-    return `<div class="msg bot${m.error ? " error" : ""}"><div class="av">${icon.bolt}</div><div class="body">${md(m.text)}${m.chips?.length ? `<div class="chips">${m.chips.map(chip).join("")}</div>` : ""}${m.via ? `<div class="meta">via ${esc(m.via)}</div>` : ""}</div></div>`;
+    return `<div class="msg bot${m.error ? " error" : ""}"><div class="av">${icon.bolt}</div><div class="body">${md(m.text)}${changeHtml(m.change)}${m.chips?.length ? `<div class="chips">${m.chips.map(chip).join("")}</div>` : ""}${m.via ? `<div class="meta">via ${esc(m.via)}</div>` : ""}</div></div>`;
   }).join("") + (S.busy ? `<div class="msg bot"><div class="av">${icon.bolt}</div><div class="body"><span class="typing"><i></i><i></i><i></i></span></div></div>` : "");
   $$("[data-chip]", box).forEach((b) => (b.onclick = () => {
     const c = chipActions.get(b.dataset.chip);
@@ -522,6 +562,7 @@ function renderChat() {
     if (c.prefill) { const t = $("#input"); t.value = c.prefill; t.focus(); autosize(); return; }
     if (c.send) send(c.send);
   }));
+  $$("details.diff", box).forEach((el) => (el.ontoggle = () => (el.open ? openDiffs.add(+el.dataset.id) : openDiffs.delete(+el.dataset.id))));
   box.scrollTop = box.scrollHeight;
   $("#send").disabled = S.busy;
   const ai = $("#aiChip");
@@ -658,9 +699,17 @@ function renderOptions() {
     `<label class="switch"><input type="checkbox" id="o-tunnel" ${o.tunnel ? "checked" : ""}><span class="track"></span>Tunnel</label>` +
     `<button class="btn quiet sm reset" id="resetOpts" title="Back to the detected defaults">${icon.refresh}Reset</button>`;
   const set = (patch) => {
+    // one timeline line while the visitor keeps adjusting the bar, measured from before the first change
+    const last = S.chat.at(-1);
+    const b = last?.optbar ? last.optbar : mark();
     const r2 = applyOptions(patch);
     if (r2.error) toast(r2.error);
     else if (r2.hadEdits) toast("Rebuilt from the options — your hand edits are one Undo away (say “undo” in chat)");
+    if (!r2.error) {
+      if (last?.optbar) S.chat.pop();
+      const change = describeChange(b);
+      if (change.changes.length) S.chat.push({ role: "event", text: "Changed in the option bar", detail: change.changes.map((c) => `${c.key} → ${c.to}`).join(" · "), optbar: b, change });
+    }
     renderAll();
   };
   $("#o-os").onchange = (e) => set({ runson: e.target.value });
@@ -766,13 +815,14 @@ function runOptimizer() {
 }
 function applyOptimizationIds(ids) {
   if (!ids.length) return;
+  const b = mark();
   snapshot();
   let { yaml, applied, regenerate: regen } = core.applyOptimizations(S.yaml, ids, { profile: S.profile, repoPath: ROOT });
   if (Object.keys(regen).length) { Object.assign(S.options, regen); yaml = core.generateYaml(S.profile, genOptions()).yaml; }
   Object.assign(S, { yaml, dirty: yaml !== S.generated, opt: null });
   validate();
   renderAll();
-  say("bot", `Applied ${plural(applied.length || ids.length, "improvement")}. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }] });
+  say("bot", `Applied ${plural(applied.length || ids.length, "improvement")}. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }], change: describeChange(b) });
 }
 function renderOptimize(el) {
   const o = runOptimizer();
@@ -827,11 +877,12 @@ function runDiagnosis() {
 }
 function useFixedYaml() {
   if (!S.diag?.fixed) return;
+  const b = mark();
   snapshot();
   Object.assign(S, { yaml: S.diag.fixed, dirty: S.diag.fixed !== S.generated });
   validate();
   renderAll();
-  say("bot", `Done: the corrected YAML is in the editor. Download it and run the job again. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }] });
+  say("bot", `Done: the corrected YAML is in the editor. Download it and run the job again. ${checkLine()}`, { chips: [{ label: "Undo", send: "undo", icon: "undo" }], change: describeChange(b) });
 }
 function renderDiagnose(el) {
   el.innerHTML = `

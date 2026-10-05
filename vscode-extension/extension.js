@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -531,20 +531,69 @@ class Studio {
       case "publishConfluence":
         await this.publishConfluence();
         break;
+      case "undoChat":
+        this.undo(m.id);
+        break;
       case "clearChat":
         this.state.chat = [];
+        this.snapshots?.clear();
         this.push();
         break;
     }
   }
 
-  // What was done per repo in this window, for "Add to Confluence".
-  logStep(step, detail) {
+  // What was done per repo in this window, for "Add to Confluence". It also goes into the chat as a
+  // timeline line (unless ui.chat is false), so the chat tells the whole story of the setup.
+  // ui: { chat, tone: "ok" | "warn" | "bad", pane: tab the line opens, url: link it opens }
+  logStep(step, detail, ui = {}) {
     if (!this.state.repo) return;
     this.journals ||= new Map();
+    const at = Date.now();
     const list = this.journals.get(this.state.repo) || [];
-    list.push({ at: Date.now(), step, detail: detail ? String(detail).slice(0, 300) : undefined });
+    list.push({ at, step, detail: detail ? String(detail).slice(0, 300) : undefined });
     this.journals.set(this.state.repo, list.slice(-100));
+    if (ui.chat === false) return;
+    this.state.chat.push({ role: "event", text: step, detail: detail ? String(detail).slice(0, 300) : "", at, tone: ui.tone || "", pane: ui.pane || "", url: ui.url || "" });
+  }
+
+  // The YAML state a chat turn starts from, so the turn can be shown as a change and undone.
+  snapshot() {
+    const { options, yaml, result, dirty, validation, repo } = this.state;
+    return { options, yaml, result, dirty, validation, repo };
+  }
+
+  restore(s) {
+    const { repo, ...rest } = s;
+    Object.assign(this.state, rest, { error: null });
+  }
+
+  // What a chat turn changed: options with why each matters, the YAML diff and the validation after it.
+  // The snapshot stays on the extension side; the webview only gets the id it sends back for Undo.
+  describeChange(before, explanations = []) {
+    this.snapshots ||= new Map();
+    const id = (this.turnSeq = (this.turnSeq || 0) + 1);
+    this.snapshots.set(id, before);
+    let list = core.optionChanges(before.options, this.state.options, explanations);
+    // direct YAML edits change no option: show the model's per-key explanations instead
+    if (!list.length) list = (explanations || []).filter((e) => e?.key && e?.why).map((e) => ({ key: e.key, why: e.why }));
+    return { id, changes: list, diff: core.lineDiff(before.yaml, this.state.yaml), check: core.checkSummary(this.state.validation) };
+  }
+
+  // Undo a chat turn (the latest one still applied when no id is given). Later turns were built on
+  // top of it, so they are undone with it.
+  undo(id) {
+    const reply = (text, applied = "") => { this.state.chat.push({ role: "assistant", text, applied, backend: "Studio" }); this.push(); };
+    const turns = this.state.chat.filter((m) => m.change && !m.change.undone);
+    const target = id ? turns.find((m) => m.change.id === id) : turns[turns.length - 1];
+    const before = target && this.snapshots?.get(target.change.id);
+    if (!before) return reply("Nothing to undo: no chat change is still applied.");
+    if (before.repo !== this.state.repo) return reply("That change was made in another repo, so it can't be undone here.");
+    const later = turns.slice(turns.indexOf(target));
+    this.restore(before);
+    for (const m of later) m.change.undone = true;
+    this.context.workspaceState.update(this.optionsKey(), this.state.options);
+    this.logStep("Undid a chat change", later.length > 1 ? `${later.length} turns` : target.text.slice(0, 160), { chat: false });
+    reply(later.length > 1 ? `Undone: the last ${later.length} changes. The YAML is back to how it was before them.` : "Undone: the YAML is back to how it was before that change.", "YAML restored.");
   }
 
   async analyze(repoPath) {
@@ -556,7 +605,7 @@ class Studio {
       this.state.profileFull = c.analyzeRepo(repoPath);
       this.state.profile = c.summarizeProfile(this.state.profileFull, 25);
       this.state.scan = c.scanRepo(repoPath);
-      this.logStep("Analyzed the repo", `${this.state.profileFull.primaryFramework || "no framework"} · ${this.state.scan.credentials.length} hard-coded credential(s)`);
+      this.logStep(`Analyzed ${path.basename(repoPath)}`, `${this.state.profileFull.primaryFramework || "no framework"} · ${this.state.scan.credentials.length} hard-coded credential(s)`, { pane: "setup", tone: this.state.scan.credentials.length ? "warn" : "" });
       this.state.discoveredUnits = null;
       // this repo's own saved options win; a repo seen for the first time starts from the user's usual settings
       const saved = this.context.workspaceState.get(this.optionsKey());
@@ -609,6 +658,7 @@ class Studio {
     const c = await loadCore();
     this.state.chat.push({ role: "user", text });
     this.push();
+    if (/^(undo|revert|go back)\b/i.test(text.trim())) return this.undo();
     // No AI backend: the shared built-in assistant (same as the web version) handles the request.
     if ((await ai.detectBackend(this.context)).name === "rules") return this.builtInChat(c, text);
     this.busy("Thinking…");
@@ -654,10 +704,12 @@ class Studio {
         optimizerSuggestions: (() => { try { return c.describeSuggestions(c.optimizeYaml(this.state.yaml, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits }).suggestions); } catch { return []; } })(),
         yamlManuallyEdited: this.state.dirty,
         knowledge: kb,
-        history: this.state.chat.slice(-9, -1).map((m) => ({ role: m.role, text: m.text })),
+        // what each turn applied, so "undo that" or "same but for Firefox" make sense to the model
+        history: this.state.chat.slice(-12, -1).map((m) => m.role === "event" ? { role: "event", text: `${m.text}${m.detail ? `: ${m.detail}` : ""}` } : { role: m.role, text: m.applied ? `${m.text}\n[${m.applied}${m.change?.changes.length ? `: ${m.change.changes.map((x) => `${x.key} ${x.from} → ${x.to}`).join("; ")}` : ""}${m.change?.undone ? " (undone)" : ""}]` : m.text }),
       };
       const { plan, backend } = await ai.plan(this.context, context, text, this.cts.token);
       let applied = "";
+      let change = null;
       if (plan.action === "update_options") {
         const next = { ...this.state.options };
         for (const k of plan.resetOptions || []) delete next[k];
@@ -667,7 +719,7 @@ class Studio {
           else if (k === "extraEnv") next[k] = Object.fromEntries(v.map((a) => [a.name, a.value]));
           else next[k] = v;
         }
-        const prev = { options: this.state.options, yaml: this.state.yaml, result: this.state.result };
+        const prev = this.snapshot();
         this.state.options = clean(next);
         this.regenerate();
         let skipped = "";
@@ -682,16 +734,18 @@ class Studio {
           applied = `⚠ YAML regenerated.${skipped}`;
         } else if (this.state.error) {
           applied = `⚠ Couldn't apply: ${this.state.error}`;
-          Object.assign(this.state, prev, { error: null, dirty: false });
-          this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
+          this.restore(prev);
         } else applied = "YAML regenerated.";
+        if (!applied.startsWith("⚠ Couldn't")) change = this.describeChange(prev, plan.explanations);
       } else if (plan.action === "replace_yaml" && plan.yaml) {
+        const prev = this.snapshot();
         this.state.yaml = plan.yaml.replace(/^```(ya?ml)?\n|```\s*$/g, "");
         this.state.dirty = true;
         this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
         applied = "YAML edited directly (option controls will overwrite these edits if you change them).";
+        change = this.describeChange(prev, plan.explanations);
       }
-      this.state.chat.push({ role: "assistant", text: plan.reply, applied, backend, sources });
+      this.state.chat.push({ role: "assistant", text: plan.reply, applied, backend, sources, change });
     } catch (e) {
       this.state.chat.push({ role: "assistant", text: `Error: ${e.message}`, error: true });
     } finally {
@@ -748,7 +802,7 @@ class Studio {
     }
     fs.writeFileSync(target.fsPath, this.state.yaml);
     this.state.existingFile = this.outputName();
-    this.logStep("Saved the YAML", this.outputName());
+    this.logStep("Saved the YAML", this.outputName(), { pane: "yaml" });
     this.toast(`Saved ${this.outputName()}`);
     this.push();
     if (openAfter) await vscode.window.showTextDocument(target, { preview: false });
@@ -816,7 +870,7 @@ class Studio {
     await vscode.workspace.applyEdit(edit);
     for (const d of docs) await d.save();
     this.toast(`Replaced ${n} credential(s) in ${plans.length} file(s)`);
-    this.logStep("Moved hard-coded credentials to environment variables", `${n} in ${plans.length} file(s)`);
+    this.logStep("Moved hard-coded credentials to environment variables", `${n} in ${plans.length} file(s)`, { pane: "setup", tone: "ok" });
     this.state.scan = c.scanRepo(this.state.repo);
     this.push();
   }
@@ -865,7 +919,8 @@ class Studio {
     try {
       const page = await c.createConfluencePage({ title: doc.title, storage: doc.storage, space, parentId: cfg.get("confluenceParentPageId") || undefined });
       c.cacheConfluencePage({ id: page.id, title: page.title, url: page.url, space: page.space, version: 1, content: doc.markdown });
-      this.logStep("Added the setup to Confluence", page.url);
+      this.logStep("Added the setup to Confluence", page.title, { url: page.url, tone: "ok" });
+      this.push();
       const open = await vscode.window.showInformationMessage(`Created "${page.title}" in Confluence.`, "Open page");
       if (open) vscode.env.openExternal(vscode.Uri.parse(page.url));
     } catch (e) {
@@ -906,10 +961,11 @@ class Studio {
   async applyOptimizations(ids) {
     const c = await loadCore();
     const r = c.applyOptimizations(this.state.yaml, ids, { profile: this.state.profileFull, repoPath: this.state.repo, units: this.state.discoveredUnits });
-    this.logStep("Applied optimizations", Array.isArray(ids) ? ids.join(", ") : "all");
+    this.logStep("Applied optimizations", Array.isArray(ids) ? ids.join(", ") : "all", { pane: "yaml" });
     if (Object.keys(r.regenerate).length) {
       this.state.options = clean({ ...this.state.options, ...r.regenerate, ...(r.regenerate.splitBy ? { executionMode: "autosplit" } : {}) });
       this.regenerate();
+      this.push();
       this.toast(`Regenerated with ${Object.entries(r.regenerate).map(([k, v]) => `${k}=${v}`).join(", ")}`);
     } else {
       this.state.yaml = r.yaml;
@@ -973,7 +1029,7 @@ class Studio {
     run.tail = "";
     run.config = config || this.outputName();
     run.targeted = run.config !== this.outputName();
-    this.logStep(`Started run ${run.attempt}${run.targeted ? " (affected tests only)" : ""}`);
+    this.logStep(`Started run ${run.attempt}${run.targeted ? " (affected tests only)" : ""}`, run.config, { pane: "runs" });
     this.push();
     const ch = this.output();
     ch.appendLine(`\n===== Attempt ${run.attempt}${run.targeted ? " (affected tests only)" : ""} — ${new Date().toLocaleTimeString()} =====`);
@@ -1026,7 +1082,12 @@ class Studio {
     run.logFiles = evidence.files;
     const entry = { attempt: run.attempt, targeted: !!run.targeted, tests: d.tests, status: run.status, durationSec: Math.round((r.finishedAt - r.startedAt) / 1000), jobUrl: run.jobUrl, changes: [], problems: passed ? [] : d.diagnoses, headline: run.failure?.headline, learned: run.learned || undefined };
     run.history.push(entry);
-    this.logStep(`Run ${run.attempt} finished`, `${run.status}${d.diagnoses.length ? ` · ${d.diagnoses.map((x) => x.title).join("; ")}` : ""}${run.learned ? " · fix remembered" : ""}`);
+    const zero = run.discoveryCheck?.verdict === "zero-tests";
+    this.logStep(`Run ${run.attempt} finished`, `${run.status}${zero ? " · 0 tests ran" : ""}${d.diagnoses.length ? ` · ${d.diagnoses.map((x) => x.title).join("; ")}` : ""}${run.learned ? " · fix remembered" : ""}`, {
+      pane: "runs",
+      url: run.jobUrl || "",
+      tone: r.stopped ? "warn" : run.status === "passed" && !zero ? "ok" : run.status === "passed-with-failures" ? "warn" : "bad",
+    });
     this.push();
     if (r.stopped) return;
     if (["fixable", "fixable-tests"].includes(run.status) && run.auto && d.canAutoFix) {
@@ -1048,20 +1109,21 @@ class Studio {
   // The built-in assistant (src/assistant.js): option changes, questions, pasted-log diagnosis,
   // optimize and CI pipelines, without any AI model.
   async builtInChat(c, text) {
-    const reply = (t, applied = "") => { this.state.chat.push({ role: "assistant", text: t, applied, backend: "Built-in assistant" }); this.push(); };
+    const reply = (t, applied = "", change = null) => { this.state.chat.push({ role: "assistant", text: t, applied, backend: "Built-in assistant", change }); this.push(); };
     const YAML = c.YAML || (await import(pathToFileURL(require.resolve("yaml")).href)).default;
     let parsed = {};
     try { parsed = YAML.parse(String(this.state.yaml || "").replace(/\$\{\{[^}]*\}\}/g, "x")) || {}; } catch {}
     if (/^(apply|use)\b.*\b(fix|fixed|corrected)\b/i.test(text.trim()) && this.pendingFix) {
+      const prev = this.snapshot();
       Object.assign(this.state, { yaml: this.pendingFix, dirty: true });
       this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
       this.pendingFix = null;
-      return reply("Done: the corrected YAML is in the editor. Save it and run again.", "YAML edited directly.");
+      return reply("Done: the corrected YAML is in the editor. Save it and run again.", "YAML edited directly.", this.describeChange(prev));
     }
     const ctx = { core: c, profile: this.state.profileFull, summary: c.summarizeProfile(this.state.profileFull, 40), result: this.state.result, yaml: this.state.yaml, validation: this.state.validation, parsed, scan: this.state.scan || { credentials: [], reporting: [] }, repoName: path.basename(this.state.repo || ""), credsOn: !!(this.state.meta?.embedCreds !== false && this.ltCreds), visitor: (s) => s };
     const plan = c.respond(text, ctx);
     if (plan.options) {
-      const prev = { options: this.state.options, yaml: this.state.yaml, result: this.state.result };
+      const prev = this.snapshot();
       const next = { ...this.state.options };
       for (const [k, v] of Object.entries(plan.options)) {
         if (v === null || v === undefined) delete next[k];
@@ -1072,14 +1134,18 @@ class Studio {
       this.regenerate();
       if (this.state.error) {
         const err = this.state.error;
-        Object.assign(this.state, prev, { error: null, dirty: false });
-        this.state.validation = strip(c.validateYaml(this.state.yaml, this.state.repo));
+        this.restore(prev);
         return reply(`I couldn't apply that: ${err}`);
       }
-      return reply(`Done: ${plan.done.join(" · ")}.`, "YAML regenerated.");
+      return reply(`Done: ${plan.done.join(" · ")}.`, "YAML regenerated.", this.describeChange(prev));
     }
-    if (plan.reset) { this.state.options = {}; this.regenerate(); return reply("Back to the detected defaults.", "YAML regenerated."); }
-    if (plan.undo) return reply("The Studio chat has no undo yet: use Reset under Setup → Options, or change the option back.");
+    if (plan.reset) {
+      const prev = this.snapshot();
+      this.state.options = {};
+      this.regenerate();
+      return reply("Back to the detected defaults.", "YAML regenerated.", this.describeChange(prev));
+    }
+    if (plan.undo) return this.undo();
     if (plan.diagnose) {
       const d = c.diagnose({ evidence: c.collectEvidence({ output: plan.diagnose }), yamlText: this.state.yaml, profile: this.state.profileFull, exitCode: 1, v02Name: c.v02FrameworkName(this.state.profileFull, this.state.profileFull.primaryFramework) });
       const lines = [`Diagnosis: **${d.status}**.`, ...d.diagnoses.slice(0, 4).map((x) => `- **${x.title}**: ${x.why}${x.fixSummary ? ` Fix: ${x.fixSummary}.` : ""}`)];
@@ -1098,7 +1164,7 @@ class Studio {
     if (plan.pipeline) {
       if (plan.pipeline === "ask") return reply("Which CI? Say GitHub Actions, GitLab, Jenkins or Azure DevOps.");
       const p = c.generatePipeline({ ci: plan.pipeline, configFile: this.outputName(), yaml: this.state.yaml });
-      this.logStep("Prepared a CI pipeline", p.path);
+      this.logStep("Prepared a CI pipeline", p.path, { chat: false });
       const doc = await vscode.workspace.openTextDocument({ content: p.content, language: p.path.endsWith("Jenkinsfile") ? "groovy" : "yaml" });
       await vscode.window.showTextDocument(doc, { preview: false });
       return reply(`Opened **${p.path}** for ${p.name} in an editor tab. Save it at that path in the repo.\n${p.notes.map((n) => `- ${n}`).join("\n")}`);
@@ -1128,7 +1194,7 @@ class Studio {
     }
     run.history[run.history.length - 1].changes.push(...r.applied);
     run.pendingFix = { failure: run.failure, before, after: this.state.yaml, how: "rules", applied: r.applied };
-    this.logStep("Fixed the YAML", r.applied.join("; "));
+    this.logStep("Fixed the YAML", r.applied.join("; "), { pane: "yaml", tone: "ok" });
     this.state.overwriteOk = true;
     await this.save(false);
     this.state.dirty = false;
@@ -1203,7 +1269,7 @@ class Studio {
     } else return this.toast("The AI suggestion isn't a valid YAML change", "error");
     run.history[run.history.length - 1].changes.push(`AI: ${s.reply.slice(0, 120)}`);
     run.pendingFix = { failure: run.failure, before, after: this.state.yaml, how: "ai", applied: [`AI: ${s.reply.slice(0, 120)}`] };
-    this.logStep("Fixed the YAML with the AI's change", s.reply.slice(0, 160));
+    this.logStep("Fixed the YAML with the AI's change", s.reply.slice(0, 160), { pane: "yaml", tone: "ok" });
     run.aiSuggestion = null;
     this.state.overwriteOk = true;
     await this.save(false);

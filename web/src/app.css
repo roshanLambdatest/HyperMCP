@@ -166,6 +166,25 @@ select { padding-right: 26px; appearance: none; background-image: linear-gradien
 .msg.me code { background: rgba(255, 255, 255, 0.18); border-color: transparent; }
 .msg .meta { font-size: 11.5px; color: var(--ink-3); margin-top: 6px; }
 .msg.error .body { color: var(--err); }
+.msg .change { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.change .why { margin: 0; padding-left: 18px; }
+.change .why li { margin: 4px 0; }
+.change .why .from { color: var(--ink-3); text-decoration: line-through; }
+.change .why .muted { color: var(--ink-2); font-size: 12.5px; }
+.change .diff summary, .event .ev-why summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px; }
+.change .diff pre { margin: 6px 0 0; padding: 8px 10px; max-height: 280px; overflow: auto; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; font: 12px/1.5 var(--mono); white-space: pre; }
+.change .add { color: var(--ok); }
+.change .del { color: var(--err); }
+.change .gap { color: var(--ink-3); }
+.event { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 10px; margin-left: 8px; border-left: 2px solid var(--line-2); font-size: 12.5px; color: var(--ink-3); }
+.event .ic { flex: 0 0 auto; width: 10px; text-align: center; }
+.event .what { min-width: 0; overflow-wrap: anywhere; }
+.event .what b { color: var(--ink-2); font-weight: 600; }
+.event .ev-why { margin-top: 4px; }
+.event .change { margin-top: 4px; color: var(--ink-2); }
+.event.ok { border-left-color: var(--ok); } .event.ok .ic { color: var(--ok); }
+.event.warn { border-left-color: var(--warn); } .event.warn .ic { color: var(--warn); }
+.event.bad { border-left-color: var(--err); } .event.bad .ic { color: var(--err); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .chip { height: 28px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--panel); font-size: 12.5px; font-weight: 550; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .chip:hover { border-color: var(--brand); color: var(--brand); }

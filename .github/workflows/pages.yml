@@ -1,0 +1,66 @@
+# The web version on GitHub Pages: https://roshanlambdatest.github.io/HyperMCP/
+# Builds web/dist, runs the browser tests under the Pages sub-path, then deploys.
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
+name: Deploy web version to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "src/**"
+      - "knowledge/**"
+      - "test/fixtures/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# one deploy at a time; a newer push replaces a queued one, a running deploy finishes
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      # the e2e test compares the page's YAML with the Node core's, so the root deps are needed too
+      - name: Install
+        run: npm ci && (cd web && npm ci)
+
+      - name: Build and test under the Pages path
+        working-directory: web
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build && node test/e2e.js
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

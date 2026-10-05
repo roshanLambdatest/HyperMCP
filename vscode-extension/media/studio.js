@@ -279,24 +279,55 @@
     return s.slice(0, 6);
   }
 
+  // What a chat turn changed: validation after it, each option with why it matters, and the YAML diff.
+  const openDiffs = new Set();
+  function changeBlock(m) {
+    const ch = m.change;
+    if (!ch) return "";
+    const k = ch.check;
+    const check = !k ? "" : k.valid
+      ? `<div class="ck ok">✓ Valid${k.warnings ? ` · ${k.warnings} warning(s)` : ""}</div>`
+      : `<div class="ck bad">✕ ${k.errors.length + k.moreErrors} validation error(s)<ul>${k.errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>${ch.undone ? "" : `<button class="chip fix-errors" data-errors="${esc(k.errors.join("\n"))}">Fix these errors</button>`}</div>`;
+    const why = ch.changes.length
+      ? `<ul class="why">${ch.changes.map((c) => `<li><code>${esc(c.key)}</code>${c.from !== undefined ? ` <span class="from">${esc(c.from)}</span> → <b>${esc(c.to)}</b>` : ""}${c.why ? `<div class="muted">${esc(c.why)}</div>` : ""}</li>`).join("")}</ul>`
+      : "";
+    const d = ch.diff;
+    const diff = d && (d.added || d.removed)
+      ? `<details class="diff" data-id="${ch.id}"${openDiffs.has(ch.id) ? " open" : ""}><summary>YAML diff <span class="add">+${d.added}</span> <span class="del">−${d.removed}</span></summary><pre>${d.lines.map((l) => `<span class="${l.op === "+" ? "add" : l.op === "-" ? "del" : l.op === "…" ? "gap" : ""}">${l.op === "…" ? "  ⋯" : esc(l.op + " " + l.text)}</span>`).join("\n")}${d.truncated ? "\n  ⋯ (open the YAML tab for the rest)" : ""}</pre></details>`
+      : "";
+    return `<div class="change${ch.undone ? " undone" : ""}">${why}${diff}${ch.undone ? "" : check}</div>`;
+  }
+
   function renderChat() {
     const log = $("#log");
     const msgs = S.chat || [];
+    const talk = msgs.filter((m) => m.role !== "event"); // timeline lines don't count as conversation
+    const EMPTY = `<div class="empty">Describe what the customer needs in plain English — OS, parallelism, how to split, browsers, tags, tunnel, reports, retries…<br>I'll update the YAML and check it against the knowledge base.</div>`;
     if (!msgs.length && !(busyLabel || "").startsWith("Thinking")) {
-      log.innerHTML = `<div class="empty">Describe what the customer needs in plain English — OS, parallelism, how to split, browsers, tags, tunnel, reports, retries…<br>I'll update the YAML and check it against the knowledge base.</div>`;
+      log.innerHTML = EMPTY;
     } else {
-      log.innerHTML = msgs
+      log.innerHTML = (talk.length ? "" : EMPTY) + msgs
         .map((m) => {
+          if (m.role === "event") {
+            const ic = { ok: "✓", warn: "!", bad: "✕" }[m.tone] || "•";
+            const time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            const open = m.url ? ` <a data-url="${esc(m.url)}" title="${esc(m.url)}">Open ↗</a>` : "";
+            return `<div class="event ${esc(m.tone)}${m.pane ? " go" : ""}" ${m.pane ? `data-pane="${esc(m.pane)}" title="Open the ${esc(m.pane)} tab"` : ""}><span class="ic">${ic}</span><span class="what"><b>${esc(m.text)}</b>${m.detail ? ` · ${esc(m.detail)}` : ""}${open}</span><span class="at">${time}</span></div>`;
+          }
           if (m.role === "user") return `<div class="msg user">${esc(m.text)}</div>`;
           const meta = [m.backend ? `via ${esc(m.backend)}` : "", ...(m.sources || []).map((s) => `<a data-url="${esc(s.url)}" title="Open in Confluence">📄 ${esc(s.title.length > 60 ? s.title.slice(0, 57) + "…" : s.title)}</a>`)].filter(Boolean);
-          return `<div class="msg assistant ${m.error ? "error" : ""}">${md(m.text)}${m.applied ? `<div class="applied ${m.applied.startsWith("⚠") ? "bad" : ""}">${esc(m.applied)} <a class="view-yaml">View YAML →</a></div>` : ""}${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}</div>`;
+          return `<div class="msg assistant ${m.error ? "error" : ""}">${md(m.text)}${m.applied ? `<div class="applied ${m.applied.startsWith("⚠") ? "bad" : ""}">${m.change?.undone ? `<s>${esc(m.applied)}</s> <span class="muted">Undone</span>` : `${esc(m.applied)} <a class="view-yaml">View YAML →</a>${m.change ? ` · <a class="undo" data-id="${m.change.id}" title="Undo this change (and any made after it)">Undo</a>` : ""}`}</div>` : ""}${changeBlock(m)}${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}</div>`;
         })
         .join("") + ((busyLabel || "").startsWith("Thinking") ? `<div class="msg assistant"><span class="typing"><i></i><i></i><i></i></span></div>` : "");
       log.querySelectorAll("a[data-url]").forEach((a) => (a.onclick = () => send("openLink", { url: a.dataset.url })));
       log.querySelectorAll("a.view-yaml").forEach((a) => (a.onclick = () => showPane("yaml")));
+      log.querySelectorAll(".event.go").forEach((el) => (el.onclick = (e) => { if (!e.target.closest("a")) showPane(el.dataset.pane); }));
+      log.querySelectorAll("a.undo").forEach((a) => (a.onclick = () => send("undoChat", { id: +a.dataset.id })));
+      log.querySelectorAll(".fix-errors").forEach((b) => (b.onclick = () => send("chat", { text: `Fix these validation errors:\n${b.dataset.errors}` })));
+      log.querySelectorAll("details.diff").forEach((el) => (el.ontoggle = () => (el.open ? openDiffs.add(+el.dataset.id) : openDiffs.delete(+el.dataset.id))));
       log.scrollTop = log.scrollHeight;
     }
-    $("#chips").innerHTML = msgs.length > 2 ? "" : suggestions().map((s) => `<button class="chip">${esc(s)}</button>`).join("");
+    $("#chips").innerHTML = talk.length > 2 ? "" : suggestions().map((s) => `<button class="chip">${esc(s)}</button>`).join("");
     $("#chips").querySelectorAll(".chip").forEach((c) => (c.onclick = () => send("chat", { text: c.textContent })));
     const thinking = (busyLabel || "").startsWith("Thinking");
     $("#sendBtn").textContent = thinking ? "Stop" : "Send";
