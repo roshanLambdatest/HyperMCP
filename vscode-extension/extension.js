@@ -14,7 +14,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js", "yaml-explain.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js", "yaml-explain.js", "yaml-problems.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -38,9 +38,11 @@ function activate(context) {
   Studio.current = studio;
   setTimeout(() => syncGistKnowledge(context, false), 5000); // background, after startup
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("hyperexecute.gistSources") && syncGistKnowledge(context, false)));
-  const open = async () => {
+  // opens the Studio; with a pane name, on that tab (the status bar uses this)
+  const open = async (pane) => {
     await vscode.commands.executeCommand("workbench.view.extension.hyperexecute");
     await vscode.commands.executeCommand("hyperexecute.studio.focus");
+    if (typeof pane === "string") studio.post({ type: "showPane", pane });
   };
   context.subscriptions.push(
     vscode.commands.registerCommand("hyperexecute.openStudio", open),
@@ -51,11 +53,12 @@ function activate(context) {
     vscode.commands.registerCommand("hyperexecute.setAnthropicKey", () => setAnthropicKey(context)),
     vscode.commands.registerCommand("hyperexecute.chooseBackend", () => chooseBackend(context)),
     vscode.commands.registerCommand("hyperexecute.validateActiveFile", () => validateActive()),
-    vscode.commands.registerCommand("hyperexecute.annotateActiveFile", () => {
-      const ed = vscode.window.activeTextEditor;
-      if (!ed) return vscode.window.showInformationMessage("Open a HyperExecute YAML first.");
-      return openAnnotated(ed.document.getText(), path.basename(ed.document.fileName));
+    vscode.commands.registerCommand("hyperexecute.annotateActiveFile", async (uri) => {
+      const doc = uri instanceof vscode.Uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
+      if (!doc) return vscode.window.showInformationMessage("Open a HyperExecute YAML first.");
+      return openAnnotated(doc.getText(), path.basename(doc.fileName));
     }),
+    vscode.commands.registerCommand("hyperexecute.runFile", (uri) => studio.runFile(uri)),
     // hover over a line of a hyperexecute*.yaml file: what it does on HyperExecute
     vscode.languages.registerHoverProvider({ language: "yaml", pattern: "**/*hyperexecute*.{yml,yaml}" }, {
       async provideHover(doc, pos) {
@@ -84,6 +87,8 @@ function activate(context) {
   status.command = "hyperexecute.openStudio";
   status.show();
   context.subscriptions.push(status);
+  statusItem = status;
+  registerYamlTools(context);
 
   registerMcpServer(context);
   watchForNewerVersion(context, status);
@@ -370,6 +375,7 @@ class Studio {
   push() {
     this.state.explain = this.explainLines();
     this.state.onDisk = this.diskState();
+    updateStatus(this.state);
     this.post({ type: "state", state: this.state });
   }
   // is the YAML in the Studio the one saved in the repo? "same" | "different" | "none"
@@ -443,6 +449,7 @@ class Studio {
         this.state.dirty = true;
         this.state.validation = strip(c.validateYaml(m.yaml, this.state.repo));
         this.post({ type: "validation", validation: this.state.validation, dirty: true, explain: this.explainLines() });
+        updateStatus(this.state);
         break;
       case "chat":
         await this.chat(m.text);
@@ -593,6 +600,21 @@ class Studio {
   restore(s) {
     const { repo, ...rest } = s;
     Object.assign(this.state, rest, { error: null });
+  }
+
+  // ▶ Run from the CodeLens of the repo's hyperexecute.yaml: load that file into the Studio and run it.
+  async runFile(uri) {
+    const folder = uri && vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath;
+    if (!folder) return;
+    await vscode.commands.executeCommand("hyperexecute.openStudio");
+    const doc = await vscode.workspace.openTextDocument(uri);
+    if (doc.isDirty) await doc.save();
+    if (this.state.repo !== folder) await this.analyze(folder);
+    const c = await loadCore();
+    const text = doc.getText();
+    Object.assign(this.state, { yaml: text, dirty: true, error: null, validation: strip(c.validateYaml(text, folder)) });
+    this.push();
+    await this.run({});
   }
 
   // "Explain this YAML line by line": the Explain tab has every line; the chat says how to read it.
@@ -1343,6 +1365,105 @@ class Studio {
 <link rel="stylesheet" href="${media("studio.css")}"><title>HyperExecute Studio</title></head>
 <body><div id="app"></div><script nonce="${nonce}" src="${media("studio.js")}"></script></body></html>`;
   }
+}
+
+// ---------- the YAML file in the editor: problems, quick fixes, links above it, status bar ----------
+
+let statusItem;
+const isHeYaml = (doc) => doc?.languageId === "yaml" && /hyperexecute.*\.ya?ml$/i.test(path.basename(doc.fileName));
+
+// Squiggles + Problems panel from the same validator the Studio uses, quick fixes for the problems
+// that can be fixed by editing text, and links above the file (status, ▶ Run, Explain, Studio).
+function registerYamlTools(context) {
+  const diags = vscode.languages.createDiagnosticCollection("hyperexecute");
+  const results = new Map(); // uri → { errors, warnings }
+  const lensChanged = new vscode.EventEmitter();
+  const S = vscode.DiagnosticSeverity;
+  const check = async (doc) => {
+    if (!isHeYaml(doc)) return;
+    const c = await loadCore();
+    const text = doc.getText();
+    let v;
+    try { v = c.validateYaml(text, vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath); } catch (e) { v = { errors: [e.message], warnings: [], info: [] }; }
+    const at = (msg, sev) => {
+      const line = doc.lineAt(Math.min(Math.max(c.locateYamlMessage(text, msg) - 1, 0), doc.lineCount - 1));
+      const d = new vscode.Diagnostic(new vscode.Range(line.lineNumber, line.firstNonWhitespaceCharacterIndex, line.lineNumber, line.text.length), String(msg).split("\n")[0], sev);
+      d.source = "HyperExecute";
+      return d;
+    };
+    diags.set(doc.uri, [...v.errors.map((m) => at(m, S.Error)), ...v.warnings.map((m) => at(m, S.Warning)), ...(v.info || []).map((m) => at(m, S.Information))]);
+    results.set(doc.uri.toString(), { errors: v.errors.length, warnings: v.warnings.length });
+    lensChanged.fire();
+  };
+  const timers = new Map();
+  const later = (doc) => { clearTimeout(timers.get(doc.uri.toString())); timers.set(doc.uri.toString(), setTimeout(() => check(doc), 400)); };
+  const sel = { language: "yaml", pattern: "**/*hyperexecute*.{yml,yaml}" };
+  context.subscriptions.push(
+    diags,
+    vscode.workspace.onDidOpenTextDocument(check),
+    vscode.workspace.onDidChangeTextDocument((e) => isHeYaml(e.document) && later(e.document)),
+    vscode.workspace.onDidCloseTextDocument((d) => { diags.delete(d.uri); results.delete(d.uri.toString()); }),
+    vscode.languages.registerCodeActionsProvider(sel, {
+      async provideCodeActions(doc, _range, ctx) {
+        const c = await loadCore();
+        const text = doc.getText();
+        const actions = [];
+        for (const d of ctx.diagnostics.filter((x) => x.source === "HyperExecute")) {
+          const fixes = c.yamlMessageFixes(text, d.message);
+          for (const f of fixes) {
+            const a = new vscode.CodeAction(f.title, vscode.CodeActionKind.QuickFix);
+            a.edit = new vscode.WorkspaceEdit();
+            for (const e of f.edits) {
+              // whole lines, with their line breaks (to the start of the next line, or the end of the file)
+              if (e.remove) a.edit.delete(doc.uri, e.to < doc.lineCount ? new vscode.Range(e.from - 1, 0, e.to, 0) : new vscode.Range(Math.max(e.from - 2, 0), e.from > 1 ? doc.lineAt(e.from - 2).text.length : 0, e.to - 1, doc.lineAt(e.to - 1).text.length));
+              else if (e.insert !== undefined) a.edit.insert(doc.uri, new vscode.Position(e.line - 1, 0), e.insert + "\n");
+              else a.edit.replace(doc.uri, doc.lineAt(e.line - 1).range, e.text);
+            }
+            a.diagnostics = [d];
+            a.isPreferred = fixes.length === 1;
+            actions.push(a);
+          }
+        }
+        return actions;
+      },
+    }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }),
+    vscode.languages.registerCodeLensProvider(sel, {
+      onDidChangeCodeLenses: lensChanged.event,
+      provideCodeLenses(doc) {
+        const top = new vscode.Range(0, 0, 0, 0);
+        const r = results.get(doc.uri.toString());
+        const folder = vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath;
+        const outName = vscode.workspace.getConfiguration("hyperexecute").get("outputFileName") || "hyperexecute.yaml";
+        const lenses = [];
+        if (r) lenses.push(new vscode.CodeLens(top, { title: `${r.errors ? `✕ ${r.errors} error${r.errors > 1 ? "s" : ""}` : "✓ Valid"}${r.warnings ? ` · ${r.warnings} warning${r.warnings > 1 ? "s" : ""}` : ""}`, command: "workbench.actions.view.problems", tooltip: "Show in the Problems panel" }));
+        // only the Studio's own file: running it loads it into the Studio, which saves to this path
+        if (folder && path.relative(folder, doc.uri.fsPath) === outName) lenses.push(new vscode.CodeLens(top, { title: "▶ Run on HyperExecute", command: "hyperexecute.runFile", arguments: [doc.uri], tooltip: "Run this file on HyperExecute and watch it in the Studio" }));
+        lenses.push(new vscode.CodeLens(top, { title: "Explain line by line", command: "hyperexecute.annotateActiveFile", arguments: [doc.uri], tooltip: "Open a copy with each line's explanation as a comment" }));
+        lenses.push(new vscode.CodeLens(top, { title: "Open Studio", command: "hyperexecute.openStudio" }));
+        return lenses;
+      },
+    })
+  );
+  vscode.workspace.textDocuments.forEach(check);
+}
+
+// The status bar says where things stand and opens the matching tab. An update notice keeps priority.
+function updateStatus(state) {
+  const s = statusItem;
+  if (!s || s.command === "workbench.action.reloadWindow") return;
+  const r = state.run, v = state.validation;
+  const ran = !!r?.history?.length;
+  let text = "$(rocket) HyperExecute", tip = "Open HyperExecute Studio", pane, bg;
+  if (r?.status === "running") [text, tip, pane] = [`$(sync~spin) HyperExecute: run ${r.attempt}`, "A HyperExecute job is running. Click to watch it.", "runs"];
+  else if (ran && r.status === "passed") [text, tip, pane] = ["$(pass) HyperExecute: passed", "The last run passed. Click for details.", "runs"];
+  else if (ran && r.status === "passed-with-failures") [text, tip, pane] = ["$(warning) HyperExecute: tests failed", "The job ran, but some tests failed. Click for details.", "runs"];
+  else if (ran && r.status !== "stopped") [text, tip, pane, bg] = [`$(error) HyperExecute: run ${r.attempt} failed`, "The last run failed. Click to see why.", "runs", new vscode.ThemeColor("statusBarItem.errorBackground")];
+  else if (v?.errors?.length) [text, tip, pane] = [`$(warning) HyperExecute: ${v.errors.length} error${v.errors.length > 1 ? "s" : ""}`, "The YAML has errors. Click to see them.", "yaml"];
+  else if (v) [text, tip] = ["$(check) HyperExecute", "The YAML is valid. Click to open the Studio."];
+  s.text = text;
+  s.tooltip = tip;
+  s.command = { command: "hyperexecute.openStudio", title: "Open HyperExecute Studio", arguments: pane ? [pane] : [] };
+  s.backgroundColor = bg;
 }
 
 // The YAML with each line's explanation as a comment above it, in a new editor tab (not saved anywhere).

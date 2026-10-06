@@ -7,6 +7,8 @@ const os = require("os");
 const posted = [];
 const opened = []; // untitled documents the extension opened ({ content, language })
 let hover; // the registered hover provider
+let codeActions, codeLenses, openDoc, statusBar; // registered YAML tools, document-open handler, status bar item
+const diagSets = new Map(); // fsPath → diagnostics
 const settings = { aiBackend: process.env.BACKEND || "rules", confluenceSpace: "HYP", outputFileName: "hyperexecute.yaml" };
 const secrets = new Map(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : []);
 if (process.env.ATL_EMAIL) settings.atlassianEmail = process.env.ATL_EMAIL;
@@ -27,10 +29,14 @@ const vscodeStub = {
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     workspaceFolders: [{ name: path.basename(tmpRepo), uri: { fsPath: tmpRepo } }],
     getConfiguration: () => ({ get: (k, d) => settings[k] ?? d, update: async (k, v) => (settings[k] = v) }),
-    getWorkspaceFolder: () => null,
+    getWorkspaceFolder: (uri) => (uri?.fsPath?.startsWith(tmpRepo) ? { uri: { fsPath: tmpRepo } } : null),
     openTextDocument: async (uri) => (uri?.content !== undefined ? (opened.push(uri), { uri: null, getText: () => uri.content }) : { uri, getText: () => fs.readFileSync(uri.fsPath, "utf8"), positionAt: (n) => n, save: async () => true }),
     applyEdit: async (edit) => { for (const o of edit.ops) fs.writeFileSync(o.uri.fsPath, o.text); return true; },
     onDidChangeConfiguration: () => ({ dispose() {} }),
+    onDidOpenTextDocument: (f) => { openDoc = f; return { dispose() {} }; },
+    onDidChangeTextDocument: () => ({ dispose() {} }),
+    onDidCloseTextDocument: () => ({ dispose() {} }),
+    textDocuments: [],
   },
   window: {
     onDidChangeWindowState: () => ({ dispose() {} }),
@@ -40,20 +46,31 @@ const vscodeStub = {
     }),
     showWarningMessage: async (...a) => { console.log("  [warn dialog]", a[0]); return a.find((x) => ["Overwrite", "Regenerate", "Replace", "Apply", "Download it"].includes(x)); },
     showInformationMessage: async (...a) => infoPick(a), withProgress: async (_o, f) => f(), showErrorMessage: async (m) => console.log("  [error]", m),
-    createStatusBarItem: () => ({ show() {}, dispose() {} }),
+    createStatusBarItem: () => (statusBar = { show() {}, dispose() {} }),
     registerWebviewViewProvider: (id, provider) => { viewProvider = provider; return { dispose() {} }; },
     showTextDocument: async () => {}, createOutputChannel: () => ({ append() {}, appendLine() {}, show() {} }), createTerminal: () => ({ show() {}, sendText: (t) => console.log("  [terminal]", t) }),
   },
   commands: { registerCommand: (id, f) => { commandHandlers[id] = f; return { dispose() {} }; }, executeCommand: async (id, ...a) => { executed.push([id, ...a]); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: () => {} },
   lm: { selectChatModels: async () => [] },
-  languages: { registerHoverProvider: (sel, provider) => { hover = provider; return { dispose() {} }; } },
+  languages: {
+    registerHoverProvider: (sel, provider) => { hover = provider; return { dispose() {} }; },
+    createDiagnosticCollection: () => ({ set: (uri, d) => diagSets.set(uri.fsPath, d), delete() {}, dispose() {} }),
+    registerCodeActionsProvider: (sel, p) => { codeActions = p; return { dispose() {} }; },
+    registerCodeLensProvider: (sel, p) => { codeLenses = p; return { dispose() {} }; },
+  },
+  Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
+  DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2 },
+  CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } },
+  CodeActionKind: { QuickFix: "quickfix" },
+  CodeLens: class { constructor(range, command) { Object.assign(this, { range, command }); } },
+  ThemeColor: class { constructor(id) { this.id = id; } },
   Hover: class { constructor(c) { this.contents = c; } },
   MarkdownString: class { constructor(v) { this.value = v; } },
-  WorkspaceEdit: class { constructor() { this.ops = []; } replace(uri, range, text) { this.ops.push({ uri, text }); } },
-  Range: class { constructor(a, b) { this.a = a; this.b = b; } },
+  WorkspaceEdit: class { constructor() { this.ops = []; } replace(uri, range, text) { this.ops.push({ uri, range, text }); } insert(uri, pos, text) { this.ops.push({ uri, insertAt: pos, insert: text }); } delete(uri, range) { this.ops.push({ uri, range, remove: true }); } },
+  Range: class { constructor(a, b, c, d) { Object.assign(this, { a, b, c, d }); } },
   Position: class { constructor(l, c) { this.l = l; this.c = c; } },
-  Uri: { file: (p) => ({ fsPath: p }), parse: (p) => ({ fsPath: p }) },
+  Uri: class { constructor(p) { this.fsPath = p; } toString() { return this.fsPath; } static file(p) { return new this(p); } static parse(p) { return new this(p); } },
   ProgressLocation: { Notification: 15 },
   ViewColumn: { Active: 1, Beside: 2 }, StatusBarAlignment: { Right: 2 }, ConfigurationTarget: { Global: 1 },
   CancellationTokenSource: class { constructor() { this.token = { onCancellationRequested() {} }; } cancel() {} dispose() {} },
@@ -150,6 +167,28 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   const runsonLine = s.yaml.split("\n").findIndex((l) => l.startsWith("runson:"));
   const h = await hover.provideHover({ getText: () => s.yaml }, { line: runsonLine });
   check("explain: hovering a line in a hyperexecute.yaml explains it", /runson/.test(h?.contents?.value) && /operating system/.test(h?.contents?.value), JSON.stringify(h));
+  // ---------- the YAML file in the editor ----------
+  const fakeDoc = (file, text) => {
+    const lines = text.split("\n");
+    return { uri: vscodeStub.Uri.file(path.join(tmpRepo, file)), fileName: path.join(tmpRepo, file), languageId: "yaml", getText: () => text, lineCount: lines.length,
+      lineAt: (n) => ({ lineNumber: n, text: lines[n], firstNonWhitespaceCharacterIndex: lines[n].match(/^\s*/)[0].length, range: { line: n } }) };
+  };
+  const broken = "version: 0.1\nrunson: windows\nautosplit: true\nconcurency: 4\nmaxRetries: 2\ntestDiscovery:\n  type: raw\n  mode: remote\n  command: ls\ntestRunnerCommand: mvn test -Dtest=$test\npre:\n  - npm ci\n";
+  const doc = fakeDoc("hyperexecute.yaml", broken);
+  await openDoc(doc);
+  const ds = diagSets.get(doc.uri.fsPath) || [];
+  const on = (re) => ds.find((d) => re.test(d.message));
+  check("editor: problems are on the right lines", on(/runson "windows"/)?.range.a === 1 && on(/Unknown top-level key "concurency"/)?.range.a === 3 && on(/maxRetries/)?.range.a === 4 && ds.every((d) => d.source === "HyperExecute"), JSON.stringify(ds.map((d) => [d.range.a, d.message.slice(0, 50)])));
+  const fixes = await codeActions.provideCodeActions(doc, null, { diagnostics: ds });
+  const titles = fixes.map((f) => f.title);
+  check("editor: quick fixes for runson, a misspelled key and retries", ["Change runson to win", "Rename to concurrency", "Set retryOnFailure: true"].every((t) => titles.includes(t)) && fixes.find((f) => f.title === "Rename to concurrency").edit.ops[0].text === "concurrency: 4", JSON.stringify(titles));
+  const lensTitles = (d) => codeLenses.provideCodeLenses(d).map((l) => l.command.title);
+  check("editor: links above the file (status, Run, Explain, Studio)", /^✕ 1 error · \d+ warnings$/.test(lensTitles(doc)[0]) && lensTitles(doc).includes("▶ Run on HyperExecute") && lensTitles(doc).includes("Explain line by line"), JSON.stringify(lensTitles(doc)));
+  check("editor: no Run link on other HyperExecute YAMLs", !lensTitles(fakeDoc("hyperexecute-smoke.yaml", broken)).includes("▶ Run on HyperExecute"));
+  await send({ type: "yamlEdited", yaml: "runson: linux\n" });
+  check("status bar: shows the YAML's problems and opens the YAML tab", /HyperExecute: \d+ error/.test(statusBar.text) && statusBar.command?.arguments?.[0] === "yaml", JSON.stringify({ text: statusBar.text, cmd: statusBar.command }));
+  await send({ type: "yamlEdited", yaml: s.yaml });
+  check("status bar: valid again", statusBar.text === "$(check) HyperExecute", statusBar.text);
   check("timeline: the save shows in the chat, undo doesn't add a line", lastState().chat.some((m) => m.role === "event" && m.text === "Saved the YAML") && !lastState().chat.some((m) => m.role === "event" && /Undid/.test(m.text)));
   if (process.env.FIXTURE === "creds") {
     s = lastState();
