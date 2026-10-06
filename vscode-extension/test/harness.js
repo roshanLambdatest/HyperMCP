@@ -167,6 +167,8 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   const runsonLine = s.yaml.split("\n").findIndex((l) => l.startsWith("runson:"));
   const h = await hover.provideHover({ getText: () => s.yaml }, { line: runsonLine });
   check("explain: hovering a line in a hyperexecute.yaml explains it", /runson/.test(h?.contents?.value) && /operating system/.test(h?.contents?.value), JSON.stringify(h));
+  // "Add to Confluence" is off while team builds share one Confluence account: no page can be created
+  check("confluence: publishing is turned off everywhere", lastState().meta.publishEnabled === false && (await (await import("../core/confluence.js")).createConfluencePage({ title: "x", storage: "x" }).then(() => false, (e) => /turned off/.test(e.message))));
   // ---------- the YAML file in the editor ----------
   const fakeDoc = (file, text) => {
     const lines = text.split("\n");

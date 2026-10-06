@@ -18,7 +18,20 @@ const ext = path.join(__dirname, "..");
 const root = path.join(ext, "..");
 const work = path.join(ext, ".build");
 const pkgDir = path.join(work, "pkg");
-const out = path.join(ext, "hyperexecute-studio.vsix");
+// --team: a build for the team, with shared Confluence access from the gitignored team-build.local.json
+// ({ "atlassianEmail": "…", "atlassianToken": "…" }). Never published: share the file privately.
+const team = process.argv.includes("--team");
+let teamCreds = null;
+if (team) {
+  const f = path.join(ext, "team-build.local.json");
+  const j = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
+  if (!j.atlassianEmail || !j.atlassianToken || /paste/i.test(j.atlassianToken)) {
+    console.error(`Team build: put your Atlassian email and API token in ${f}`);
+    process.exit(1);
+  }
+  teamCreds = { email: j.atlassianEmail.trim(), token: j.atlassianToken.trim() };
+}
+const out = path.join(ext, team ? "hyperexecute-studio-team.vsix" : "hyperexecute-studio.vsix");
 
 fs.rmSync(work, { recursive: true, force: true });
 fs.mkdirSync(path.join(pkgDir, "media"), { recursive: true });
@@ -51,7 +64,7 @@ const common = { bundle: true, platform: "node", target: "node18", minify: true,
 const esmBanner = { js: 'import { createRequire as __cr } from "module"; const require = __cr(import.meta.url);' };
 esbuild.buildSync({ ...common, entryPoints: [path.join(work, "core-entry.mjs")], format: "esm", outfile: path.join(work, "core.mjs"), banner: esmBanner });
 esbuild.buildSync({ ...common, entryPoints: [path.join(work, "mcp-entry.mjs")], format: "esm", outfile: path.join(work, "mcp.mjs"), banner: esmBanner });
-esbuild.buildSync({ ...common, entryPoints: [path.join(ext, "extension.js")], format: "cjs", outfile: path.join(work, "extension.js"), external: ["vscode"] });
+esbuild.buildSync({ ...common, entryPoints: [path.join(ext, "extension.js")], format: "cjs", outfile: path.join(work, "extension.js"), external: ["vscode"], define: { __HE_TEAM__: teamCreds ? JSON.stringify(teamCreds) : "null" } });
 esbuild.buildSync({ entryPoints: [path.join(ext, "media", "studio.css")], minify: true, outfile: path.join(pkgDir, "media", "studio.css"), logLevel: "warning" });
 
 // 4. obfuscate (names, strings and structure); settings chosen to keep runtime speed

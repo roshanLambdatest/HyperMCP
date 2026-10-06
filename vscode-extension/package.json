@@ -198,7 +198,8 @@
   "scripts": {
     "sync": "node scripts/sync-core.js",
     "package": "node scripts/build-protected.js",
-    "package:dev": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-studio.vsix"
+    "package:dev": "npm run sync && npx --yes @vscode/vsce package --skip-license -o hyperexecute-studio.vsix",
+    "package:team": "node scripts/build-protected.js --team"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.129.0",

@@ -66,8 +66,15 @@ export async function whoAmI() {
   return identity;
 }
 
+// "Add to Confluence" is turned off while the team tests builds that share one Confluence account,
+// so nobody creates pages under that account. Set to true to bring it back.
+// HE_CONFLUENCE_PUBLISH=on turns it on for one process (the smoke test's fake Confluence uses it).
+export const CONFLUENCE_PUBLISH_ENABLED = false;
+const publishEnabled = () => CONFLUENCE_PUBLISH_ENABLED || process.env.HE_CONFLUENCE_PUBLISH === "on";
+
 // Create a page (Confluence storage format). Cloud uses the v2 API; Data Center (bearer) the v1 content API.
 export async function createConfluencePage({ title, storage, space, parentId }) {
+  if (!publishEnabled()) throw new Error("Add to Confluence is turned off for now. Use preview to see the page content.");
   const cfg = confluenceConfig();
   await whoAmI();
   const key = space || env("CONFLUENCE_PUBLISH_SPACE") || "HYP";

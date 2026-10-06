@@ -7,6 +7,10 @@ const { pathToFileURL } = require("url");
 const { execFile } = require("child_process");
 const ai = require("./ai");
 
+// Team builds (npm run package:team) carry shared Confluence access, added at build time from the
+// gitignored team-build.local.json. Public builds and development have none. Temporary, for team testing.
+const TEAM = typeof __HE_TEAM__ !== "undefined" && __HE_TEAM__ ? __HE_TEAM__ : null;
+
 let core;
 async function loadCore() {
   if (!core) {
@@ -23,14 +27,16 @@ async function loadCore() {
 // Confluence module reads credentials from env at call time.
 async function applyAtlassianEnv(context) {
   const cfg = vscode.workspace.getConfiguration("hyperexecute");
-  const token = await context.secrets.get("hyperexecute.atlassianToken");
+  const own = { email: cfg.get("atlassianEmail"), token: await context.secrets.get("hyperexecute.atlassianToken") };
+  // a user's own account wins; a team build falls back to the shared one
+  const use = own.email && own.token ? own : TEAM ? { email: TEAM.email, token: TEAM.token } : own;
   const set = (k, v) => (v ? (process.env[k] = v) : delete process.env[k]);
-  set("ATLASSIAN_EMAIL", cfg.get("atlassianEmail"));
-  set("ATLASSIAN_API_TOKEN", token);
+  set("ATLASSIAN_EMAIL", use.email);
+  set("ATLASSIAN_API_TOKEN", use.token);
   set("CONFLUENCE_BASE_URL", cfg.get("confluenceBaseUrl"));
   set("CONFLUENCE_SPACE", cfg.get("confluenceSpace"));
   process.env.HE_GISTS = cfg.get("gistSources") || "off"; // empty setting = off; the default is the shared pool
-  return { email: cfg.get("atlassianEmail"), token };
+  return { email: use.email, token: use.token, team: use !== own };
 }
 
 function activate(context) {
@@ -202,6 +208,11 @@ async function downloadVsix(rel) {
 }
 
 async function checkForUpdate(context, manual) {
+  // a team build would lose its shared Confluence access if a public release replaced it
+  if (TEAM) {
+    if (manual) vscode.window.showInformationMessage("This is a team build with shared Confluence access, so it doesn't update from the public releases. Get new versions from the person who shared it.");
+    return;
+  }
   const mode = vscode.workspace.getConfiguration("hyperexecute").get("autoUpdate") || "notify";
   if (!manual && mode === "off") return;
   const running = context.extension?.packageJSON?.version;
@@ -396,11 +407,11 @@ class Studio {
 
   async refreshMeta() {
     const b = await ai.detectBackend(this.context);
-    const { email, token } = await applyAtlassianEnv(this.context);
+    const { email, token, team } = await applyAtlassianEnv(this.context);
     const acct = await this.ltAccount();
     this.ltCreds = acct.username && acct.accessKey ? acct : null;
     const embedCreds = this.context.globalState.get("hyperexecute.embedCredentials") !== false;
-    this.state.meta = { ltUser: acct.username || null, ltReady: !!(acct.username && acct.accessKey), embedCreds, backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
+    this.state.meta = { ltUser: acct.username || null, ltReady: !!(acct.username && acct.accessKey), embedCreds, backend: ai.LABELS[b.name], backendId: b.name, confluence: !!(email && token), confluenceTeam: !!team, publishEnabled: !!(await loadCore()).CONFLUENCE_PUBLISH_ENABLED, confluenceSpace: vscode.workspace.getConfiguration("hyperexecute").get("confluenceSpace") || "HYP" };
     this.push();
   }
 
@@ -951,8 +962,9 @@ class Studio {
 
   // ---------- Add to Confluence: a page documenting what was done for this repo ----------
   async publishConfluence() {
-    if (!this.state.repo) return this.toast("Open a repo first");
     const c = await loadCore();
+    if (!c.CONFLUENCE_PUBLISH_ENABLED) return vscode.window.showInformationMessage("Add to Confluence is turned off for now.");
+    if (!this.state.repo) return this.toast("Open a repo first");
     let { email, token } = await applyAtlassianEnv(this.context);
     if (!email || !token) {
       await setAtlassian(this.context);

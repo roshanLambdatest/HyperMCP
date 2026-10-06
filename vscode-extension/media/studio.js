@@ -243,7 +243,8 @@
     bp.title = `AI: ${m.backend || "…"}${m.backendId === "rules" ? " (no AI model; click to choose one)" : ""}. Click to change.`;
     const kp = $("#kbPill");
     kp.children[0].className = "dot " + (m.confluence ? "on" : "off");
-    kp.title = m.confluence ? `Knowledge base: Confluence ${m.confluenceSpace} connected` : "Knowledge base: bundled notes only. Click to connect Confluence.";
+    kp.title = m.confluence ? `Knowledge base: Confluence ${m.confluenceSpace} connected${m.confluenceTeam ? " (shared team access)" : ""}` : "Knowledge base: bundled notes only. Click to connect Confluence.";
+    $('#moreMenu [data-act="publish"]').hidden = !m.publishEnabled;
     $('#moreMenu [data-act="kb"]').textContent = m.confluence ? `Confluence: ${m.confluenceSpace} (change…)` : "Connect Confluence…";
     $('#moreMenu [data-act="backend"]').textContent = `AI: ${m.backend || "…"} (change…)`;
   }

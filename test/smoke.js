@@ -346,7 +346,7 @@ check("headline drops the CLI spinner and timestamp, so the same error groups ac
     });
   });
   await new Promise((r) => conf.listen(0, "127.0.0.1", r));
-  const env = { ...process.env, HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "", HE_ACCURACY_CASES: "", ATLASSIAN_EMAIL: "qa@example.com", ATLASSIAN_API_TOKEN: "atl-token-xyz", CONFLUENCE_BASE_URL: `http://127.0.0.1:${conf.address().port}/wiki`, CONFLUENCE_SPACE: "HYP", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") };
+  const env = { ...process.env, HE_STATE_DIR: state, HE_KB_CACHE_DIR: path.join(state, "kb-cache"), HE_LEARN: "", HE_ACCURACY_CASES: "", ATLASSIAN_EMAIL: "qa@example.com", ATLASSIAN_API_TOKEN: "atl-token-xyz", HE_CONFLUENCE_PUBLISH: "on", CONFLUENCE_BASE_URL: `http://127.0.0.1:${conf.address().port}/wiki`, CONFLUENCE_SPACE: "HYP", LT_USERNAME: "tester", LT_ACCESS_KEY: "test-key-123", HE_CLI_PATH: path.join(here, "bin", "fake-hyperexecute.sh") };
   delete env.HE_ACCURACY_CASES;
   await client.close();
   await client.connect(new StdioClientTransport({ command: "node", args: [path.join(here, "..", "src", "index.js")], env }));

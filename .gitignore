@@ -16,3 +16,5 @@ web/dist/
 web/test/shots/
 web/src/samples.gen.js
 web/src/kb.gen.js
+# the team build's shared Confluence credentials (npm run package:team) — never commit
+vscode-extension/team-build.local.json
