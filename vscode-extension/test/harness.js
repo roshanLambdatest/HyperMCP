@@ -10,7 +10,8 @@ let hover; // the registered hover provider
 let codeActions, codeLenses, openDoc, statusBar; // registered YAML tools, document-open handler, status bar item
 const diagSets = new Map(); // fsPath → diagnostics
 const settings = { aiBackend: process.env.BACKEND || "rules", confluenceSpace: "HYP", outputFileName: "hyperexecute.yaml" };
-const secrets = new Map(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : []);
+// a test LambdaTest account: hyperexecute analyze needs one before any YAML is generated
+const secrets = new Map([["hyperexecute.ltAccessKey", "test-key-123"], ...(process.env.ATL_TOKEN ? [["hyperexecute.atlassianToken", process.env.ATL_TOKEN]] : [])]);
 if (process.env.ATL_EMAIL) settings.atlassianEmail = process.env.ATL_EMAIL;
 let onMessage;
 const commandHandlers = {};
@@ -21,7 +22,10 @@ const fixture = (n) => path.join(__dirname, "..", "..", "test", "fixtures", n);
 const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "he-repo-"));
 // learning and caches go to a throwaway folder, not the developer's ~/.hyperexecute-studio
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "he-state-"));
-Object.assign(process.env, { HE_GISTS: "off", HE_DOCS: "off", HE_UPDATE_CHECK: "off", HE_STATE_DIR: stateDir, HE_KB_CACHE_DIR: path.join(stateDir, "kb-cache"), HE_FEEDBACK_DIR: path.join(stateDir, "feedback") });
+// a throwaway home folder: the tests remove and add LambdaTest accounts, and must never touch the
+// developer's own ~/.hyperexecute-studio/credentials.json
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "he-home-"));
+Object.assign(process.env, { HOME: home, USERPROFILE: home, HE_CLI_PATH: path.join(__dirname, "..", "..", "test", "bin", "fake-hyperexecute.sh"), HE_GISTS: "off", HE_DOCS: "off", HE_UPDATE_CHECK: "off", HE_STATE_DIR: stateDir, HE_KB_CACHE_DIR: path.join(stateDir, "kb-cache"), HE_FEEDBACK_DIR: path.join(stateDir, "feedback") });
 fs.cpSync(fixture(process.env.FIXTURE || "maven-cucumber"), tmpRepo, { recursive: true });
 
 const vscodeStub = {
@@ -84,7 +88,7 @@ const ext = require("../extension.js");
 const ctx = {
   extensionPath: path.join(__dirname, ".."), subscriptions: [],
   secrets: { get: async (k) => secrets.get(k), store: async (k, v) => secrets.set(k, v), delete: async (k) => secrets.delete(k), onDidChange: () => ({ dispose() {} }) },
-  globalState: { _m: new Map(), get(k, d) { return this._m.has(k) ? this._m.get(k) : d; }, async update(k, v) { this._m.set(k, v); } },
+  globalState: { _m: new Map([["hyperexecute.ltUsername", "tester"]]), get(k, d) { return this._m.has(k) ? this._m.get(k) : d; }, async update(k, v) { this._m.set(k, v); } },
   workspaceState: { get: (k, d) => d, update: async () => {} },
 };
 ext.activate(ctx);
@@ -116,6 +120,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   await send({ type: "ready" });
   let s = lastState();
   check("analyzed + generated", s?.profile && s.yaml.includes("version:"), s?.error);
+  check("hyperexecute analyze ran before the YAML, with the account", s.cliAnalyze?.supported && !s.gate && s.chat.some((m) => m.role === "event" && m.text === "Ran HyperExecute analyze") && !fs.existsSync(path.join(tmpRepo, "hyperexecute-analyze.log")), JSON.stringify({ a: s.cliAnalyze, gate: s.gate }));
   check("timeline: the analysis shows in the chat", s.chat.some((m) => m.role === "event" && /^Analyzed /.test(m.text) && m.pane === "setup"), JSON.stringify(s.chat));
   console.log(`  framework=${s.result.framework} v${s.result.yamlVersion} split=${s.result.splitBy} backend=${s.meta.backend}`);
 
@@ -195,6 +200,7 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   if (process.env.FIXTURE === "creds") {
     s = lastState();
     check("scan: 13 credentials, reporting found", s.scan.credentials.length === 13 && s.scan.reporting.length >= 3, s.scan.summary);
+    await send({ type: "ltAccountClear" });
     await send({ type: "run" });
     check("run without account → asks for Setup", posted.some((m) => m.type === "showPane" && m.pane === "setup"));
     await send({ type: "ltAccountSave", username: "nobody", accessKey: "not-a-real-key-123" });
@@ -215,6 +221,21 @@ const check = (label, cond, extra) => { console.log(`${cond ? "PASS" : "FAIL"}  
   }
   await send({ type: "optimize" });
   const op = [...posted].reverse().find((m) => m.type === "optimize");
+  {
+    await send({ type: "ltAccountClear" });
+    await send({ type: "reanalyze" });
+    const g = lastState();
+    check("no account: no YAML, and the YAML tab says why", g.gate?.kind === "account" && g.yaml === "" && !g.cliAnalyze, JSON.stringify({ gate: g.gate, yaml: g.yaml.slice(0, 40) }));
+    await send({ type: "chat", text: "Run on Windows 11 with 10 VMs" });
+    check("no account: the chat won't create a YAML either", /needs your LambdaTest account/.test(lastState().chat.at(-1).text) && lastState().yaml === "");
+    await send({ type: "save" });
+    check("no account: nothing to save", posted.some((m) => m.type === "toast" && /no YAML yet/.test(m.text)));
+    // the account comes back: analyze runs, then the YAML is generated
+    await ctx.globalState.update("hyperexecute.ltUsername", "tester");
+    await ctx.secrets.store("hyperexecute.ltAccessKey", "test-key-123");
+    await send({ type: "reanalyze" });
+    check("account back: analyze runs and the YAML is generated", lastState().cliAnalyze && /version:/.test(lastState().yaml));
+  }
   check("optimize returns suggestions", op && Array.isArray(op.result.suggestions), JSON.stringify(op));
   if (op?.result.suggestions.length) {
     await send({ type: "applyOptimizations", ids: "all" });

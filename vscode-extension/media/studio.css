@@ -383,3 +383,10 @@ body.vscode-light .t-key { color: var(--vscode-debugTokenExpression-name, #9b46b
 body.vscode-light .t-str { color: var(--vscode-debugTokenExpression-string, #a31515); }
 body.vscode-light .t-num, body.vscode-light .t-bool { color: var(--vscode-debugTokenExpression-number, #098658); }
 body.vscode-light .t-var { color: var(--vscode-debugTokenExpression-boolean, #0000ff); }
+
+/* before hyperexecute analyze has run: why there's no YAML, and what to do */
+.gate { margin: 8px 10px; padding: 8px 10px; border-left: 3px solid var(--warn); background: rgba(204, 167, 0, 0.08); font-size: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+/* Setup → HyperExecute analyze */
+.an-box { margin-top: 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; }
+.an-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 6px; font-size: 11.5px; padding: 1px 0; overflow-wrap: anywhere; }
+.an-row code { font-family: var(--mono); font-size: 11px; }

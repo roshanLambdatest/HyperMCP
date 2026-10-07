@@ -18,7 +18,7 @@ async function loadCore() {
     const bundled = path.join(__dirname, "core.mjs");
     if (fs.existsSync(bundled)) return (core = { ...(await import(pathToFileURL(bundled).href)) });
     const imp = (f) => import(pathToFileURL(path.join(__dirname, "core", f)).href);
-    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js", "yaml-explain.js", "yaml-problems.js"].map(imp));
+    const mods = await Promise.all(["analyzer.js", "generator.js", "validator.js", "knowledge.js", "confluence.js", "security.js", "capabilities.js", "optimizer.js", "runner.js", "doctor.js", "credentials.js", "feedback.js", "discovery-check.js", "assistant.js", "names.js", "pipelines.js", "learning.js", "report.js", "gists.js", "docs.js", "changes.js", "yaml-explain.js", "yaml-problems.js", "cli-analyze.js"].map(imp));
     core = Object.assign({}, ...mods);
   }
   return core;
@@ -682,10 +682,12 @@ class Studio {
       this.state.dirty = false;
       const out = path.join(repoPath, this.outputName());
       this.state.existingFile = fs.existsSync(out) ? this.outputName() : null;
+      await this.runHyperexecuteAnalyze();
       this.regenerate();
     } finally {
       this.busy();
     }
+    this.push();
   }
 
   outputName() {
@@ -702,15 +704,56 @@ class Studio {
   async credsChanged() {
     await this.refreshMeta();
     if (!this.state.profileFull) return;
+    if (!this.state.cliAnalyze) {
+      await this.runHyperexecuteAnalyze();
+      this.regenerate();
+      return this.push();
+    }
     if (this.state.dirty) return this.toast("Your hand edits are kept — the account goes into the YAML the next time it is regenerated.");
     this.regenerate();
     this.push();
   }
 
+  // The generator, with hyperexecute analyze's findings applied: the runtime the project declares,
+  // the tunnel when something is private, and notes saying where each choice came from.
+  generateWith(extra = {}) {
+    const a = core.applyCliAnalyze(this.state.profileFull, this.state.cliAnalyze);
+    const r = core.generateYaml(a.profile, { ...a.defaults, ...this.genOptions(extra) });
+    return { ...r, notes: [...a.notes, ...(r.notes || [])] };
+  }
+
+  // hyperexecute analyze runs on the repo, with the user's account, before any YAML is generated.
+  // Without an account (or when it fails) there's no YAML: state.gate says why.
+  async runHyperexecuteAnalyze() {
+    const c = await loadCore();
+    const acct = await this.ltAccount();
+    this.state.cliAnalyze = null;
+    if (!acct.username || !acct.accessKey) return (this.state.gate = { kind: "account" });
+    try {
+      this.busy("Preparing the HyperExecute CLI…");
+      const cli = await c.ensureCli(this.state.repo);
+      this.busy("Running HyperExecute analyze…");
+      const { output, ...a } = await c.runCliAnalyze({ cli, repoPath: this.state.repo, username: acct.username, accessKey: acct.accessKey });
+      this.state.cliAnalyze = a;
+      this.state.gate = null;
+      this.logStep("Ran HyperExecute analyze", a.supported ? [a.language, a.buildTool || a.packageManager, ...a.frameworks.map((f) => f.coordinate || f.name)].filter(Boolean).join(" · ") : a.reason, { pane: "setup", tone: a.supported ? "ok" : "warn" });
+    } catch (e) {
+      this.state.gate = { kind: "failed", message: e.message };
+      this.logStep("HyperExecute analyze failed", e.message, { pane: "yaml", tone: "bad" });
+    } finally {
+      this.busy();
+    }
+  }
+
   regenerate() {
     const c = core;
+    if (!this.state.cliAnalyze) {
+      // no YAML before hyperexecute analyze has run
+      Object.assign(this.state, { result: null, yaml: "", validation: null, error: null, dirty: false });
+      return;
+    }
     try {
-      const r = c.generateYaml(this.state.profileFull, this.genOptions({ outputFileName: this.outputName() }));
+      const r = this.generateWith({ outputFileName: this.outputName() });
       this.state.result = { yamlVersion: r.yamlVersion, framework: r.framework, splitBy: r.splitBy, executionMode: r.executionMode, supportedSplits: r.supportedSplits, notes: r.notes, warnings: r.warnings };
       this.state.yaml = r.yaml;
       this.state.dirty = false;
@@ -728,6 +771,11 @@ class Studio {
     this.state.chat.push({ role: "user", text });
     this.push();
     if (/^(undo|revert|go back)\b/i.test(text.trim())) return this.undo();
+    if (!this.state.cliAnalyze && this.state.profileFull) {
+      this.state.chat.push({ role: "assistant", text: this.state.gate?.kind === "failed" ? `HyperExecute analyze has to run before I can create a YAML, and it failed: ${this.state.gate.message} Use **Retry** in the YAML tab.` : "HyperExecute analyze has to run on the repo before I can create a YAML, and it needs your LambdaTest account. Add it in **Setup**; analyze then runs and the YAML is generated.", backend: "Studio" });
+      this.post({ type: "showPane", pane: this.state.gate?.kind === "failed" ? "yaml" : "setup" });
+      return this.push();
+    }
     if (/\b(line[- ]by[- ]line|each line|every line|annotat)/i.test(text)) return this.explainInChat();
     // No AI backend: the shared built-in assistant (same as the web version) handles the request.
     if ((await ai.detectBackend(this.context)).name === "rules") return this.builtInChat(c, text);
@@ -766,6 +814,7 @@ class Studio {
       const context = {
         repo: path.basename(this.state.repo || ""),
         analysis: c.summarizeProfile(this.state.profileFull, 15),
+        hyperexecuteAnalyze: this.state.cliAnalyze,
         currentOptions: this.state.options,
         generated: this.state.result,
         currentYaml: this.state.yaml,
@@ -858,6 +907,7 @@ class Studio {
 
   async save(openAfter) {
     if (!this.state.repo) return;
+    if (!this.state.yaml) return this.toast("There's no YAML yet: HyperExecute analyze runs first (it needs your LambdaTest account).", "error");
     core?.recordChoice?.(this.state.profileFull, this.state.options);
     const target = vscode.Uri.file(path.join(this.state.repo, this.outputName()));
     if (fs.existsSync(target.fsPath) && fs.readFileSync(target.fsPath, "utf8") !== this.state.yaml && !this.state.overwriteOk) {
@@ -1222,7 +1272,7 @@ class Studio {
       const lines = [`Diagnosis: **${d.status}**.`, ...d.diagnoses.slice(0, 4).map((x) => `- **${x.title}**: ${x.why}${x.fixSummary ? ` Fix: ${x.fixSummary}.` : ""}`)];
       if (d._fixes.length) {
         let next = c.applyDiagnosisFixes(this.state.yaml, d);
-        if (Object.keys(next.options).length) next = c.applyDiagnosisFixes(c.generateYaml(this.state.profileFull, this.genOptions(next.options)).yaml, d, d._fixes.filter((f) => f.patch).map((f) => f.id));
+        if (Object.keys(next.options).length) next = c.applyDiagnosisFixes(this.generateWith(next.options).yaml, d, d._fixes.filter((f) => f.patch).map((f) => f.id));
         if (next.yaml !== this.state.yaml) { this.pendingFix = next.yaml; lines.push("I prepared a corrected YAML. Say **apply the fix** to put it in the editor."); }
       } else if (!d.diagnoses.length) lines.push("No known failure pattern matched.");
       return reply(lines.join("\n"));
@@ -1278,7 +1328,7 @@ class Studio {
         fixedYaml: this.state.yaml,
         selectors: sels,
         profile: this.state.profileFull,
-        generate: (o) => c.generateYaml(this.state.profileFull, this.genOptions(o)).yaml,
+        generate: (o) => this.generateWith(o).yaml,
       });
       if (rerunYaml) {
         fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), rerunYaml);
@@ -1353,7 +1403,7 @@ class Studio {
     const d = this.lastDiagnosis;
     const sels = d.tests.list.map((t) => t.selector).filter(Boolean);
     if (!sels.length || !core) return undefined;
-    const y = core.buildTargetedRerun({ fixedYaml: this.state.yaml, selectors: sels, profile: this.state.profileFull, generate: (o) => core.generateYaml(this.state.profileFull, this.genOptions(o)).yaml });
+    const y = core.buildTargetedRerun({ fixedYaml: this.state.yaml, selectors: sels, profile: this.state.profileFull, generate: (o) => this.generateWith(o).yaml });
     if (!y) return undefined;
     fs.writeFileSync(path.join(this.state.repo, ".hyperexecute-rerun.yaml"), y);
     return ".hyperexecute-rerun.yaml";

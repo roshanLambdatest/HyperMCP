@@ -1,0 +1,2 @@
+2026-01-01T00:00:00Z    error    error while detecting language No language detected
+2026-01-01T00:00:00Z    error    error while running analyze No language detected

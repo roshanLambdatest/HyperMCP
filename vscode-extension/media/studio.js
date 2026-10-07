@@ -254,7 +254,7 @@
     const v = S.validation, r = S.run, m = S.meta || {};
     const errs = v?.errors?.length || 0;
     const steps = [
-      ["Analyzed", !!S.profile],
+      ["Analyzed", !!S.profile && !!S.cliAnalyze],
       ["Valid", !!v && !errs],
       ["Saved", S.onDisk === "same"],
       ["Ran", !!r?.history?.length],
@@ -263,6 +263,8 @@
     let next;
     if (!S.repos?.length) next = { label: "Open a folder", hint: "Open your test repo in VS Code", act: () => send("command", { id: "workbench.action.files.openFolder" }) };
     else if (!S.profile) next = { label: "Analyze", hint: "Analyze this repo", act: () => send("reanalyze") };
+    else if (S.gate?.kind === "account") next = { label: "Add account", hint: "HyperExecute analyze needs your LambdaTest account", act: () => showPane("setup") };
+    else if (S.gate?.kind === "failed") next = { label: "Retry", hint: "HyperExecute analyze failed", act: () => send("reanalyze") };
     else if (errs) next = { label: `Fix ${errs} error${errs > 1 ? "s" : ""}`, hint: "The YAML has problems", act: () => { showPane("yaml"); activeTab = "validation"; renderChecks(); } };
     else if (S.onDisk !== "same") next = { label: "Save to repo", hint: S.onDisk === "different" ? "The repo's file differs from this YAML" : "Not saved in the repo yet", act: () => send("save") };
     else if (!m.ltReady) next = { label: "Add account", hint: "Add your LambdaTest account to run", act: () => showPane("setup") };
@@ -319,9 +321,26 @@
       <div class="stats">${stats.map(([k, n]) => `<div class="stat"><b>${n}</b><span>${k}</span></div>`).join("") || `<span class="muted small">No tests detected</span>`}</div>
       ${t.tags?.length ? `<div class="small muted" style="margin-top:8px">Tags: ${t.tags.slice(0, 8).map(esc).join(", ")}</div>` : ""}
       ${w.length ? `<details class="warn"><summary>⚠ ${w.length} thing${w.length > 1 ? "s" : ""} to check</summary><ul>${w.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
-      ${confidenceBlock(p)}`;
+      ${confidenceBlock(p)}
+      ${analyzeBlock()}`;
     el.querySelectorAll("button.answer").forEach((b) => (b.onclick = () => { showPane("chat"); input.value = b.dataset.q + "\n→ "; autosize(); input.focus(); }));
     $("#fileState").textContent = S.existingFile ? `${S.existingFile} exists in repo` : "";
+  }
+
+  // hyperexecute analyze's findings (or why it has none)
+  function analyzeBlock() {
+    const a = S.cliAnalyze;
+    if (!a) return `<div class="an-box"><div class="conf-sub">HyperExecute analyze</div><div class="small muted">${S.gate?.kind === "failed" ? `Failed: ${esc(S.gate.message)}` : "Runs when your LambdaTest account is added below. No YAML is created before it."}</div></div>`;
+    if (!a.supported) return `<div class="an-box"><div class="conf-sub">HyperExecute analyze</div><div class="small">${esc(a.reason)}. The YAML comes from the Studio's own analysis.</div></div>`;
+    const row = (k, v) => (v ? `<div class="an-row"><span class="muted">${k}</span><span>${v}</span></div>` : "");
+    const urls = [...a.privateEndpoints, ...a.inaccessibleUrls];
+    return `<div class="an-box"><div class="conf-sub">HyperExecute analyze</div>` +
+      row("Language", esc(a.language)) +
+      row("Build", esc([a.buildTool, a.buildToolVersion].filter(Boolean).join(" ") || a.packageManager || "")) +
+      row("Project Java", esc(a.declaredRuntime || "")) +
+      row("Frameworks", a.frameworks.map((f) => `<code>${esc(f.coordinate || f.name)}</code>`).join(" ")) +
+      row("Private", esc([...urls, ...a.privateRegistries].join(", ")) || '<span class="ok">none found</span>') +
+      `</div>`;
   }
 
   // What the analysis is unsure about: confidence, what it assumed, and what to ask before generating.
@@ -460,7 +479,11 @@
     const r = S.result || {};
     $("#verBadge").textContent = r.yamlVersion ? `v${r.yamlVersion}` : "";
     $("#edited").textContent = S.dirty ? "● edited" : "";
-    $("#genError").innerHTML = S.error ? `<div class="error-banner">${esc(S.error)}</div>` : "";
+    const g = S.gate;
+    $("#genError").innerHTML = g
+      ? `<div class="gate"><b>No YAML yet</b><div>${g.kind === "account" ? "HyperExecute analyze runs on the repo before a YAML is created, and it needs your LambdaTest account." : `HyperExecute analyze failed: ${esc(g.message)}`}</div><button class="btn primary small" id="gateBtn">${g.kind === "account" ? "Add account in Setup" : "Retry"}</button></div>`
+      : S.error ? `<div class="error-banner">${esc(S.error)}</div>` : "";
+    if (g) $("#gateBtn").onclick = () => (g.kind === "account" ? showPane("setup") : send("reanalyze"));
     $("#dry").disabled = r.yamlVersion === "0.2" && !S.dirty;
     $("#dry").title = r.yamlVersion === "0.2" ? "v0.2 discovery runs on HyperExecute" : "Run the discovery command locally";
   }

@@ -1,0 +1,13 @@
+2026-01-01T00:00:00Z    error    not able find runtime version exec: "dotnet": executable file not found in $PATH, stderr 
+2026-01-01T00:00:00Z    error    error while finding build tool version exec: "dotnet": executable file not found in $PATH, stderr 
+2026-01-01T00:00:00Z    error    error while detecting package manager version exec: "dotnet": executable file not found in $PATH
+2026-01-01T00:00:00Z    error    error while detecting test frameworks open Tests.csproj: no such file or directory
+2026-01-01T00:00:00Z    error    error while finding private registry open /repo/Tests.csproj: no such file or directory
+2026-01-01T00:00:00Z    error    error while finding external test reporters open /repo/Tests.csproj: no such file or directory
++--------------+
+| HyperExecute |
+|   Analyzer   |
++------+-------+
+| ITEM | VALUE |
++------+-------+
++------+-------+

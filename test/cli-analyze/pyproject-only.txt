@@ -1,0 +1,2 @@
+Analyzer currently does not support language Python
+2026-01-01T00:00:00Z    error    error while running analyze Unsupported Language

@@ -28,6 +28,7 @@ import { startUpdateCheck, updateInfo, takeUpdateNote } from "./updates.js";
 import { buildSetupReport } from "./report.js";
 import { syncGists, gistsStatus, gistSources } from "./gists.js";
 import { searchDocs, docsStatus, localIsWeak } from "./docs.js";
+import { runCliAnalyze, applyCliAnalyze } from "./cli-analyze.js";
 
 // Sent to every MCP client (Claude, Copilot…) on connect: the playbook, so the agent follows it without being told.
 const INSTRUCTIONS = `HyperExecute Studio: tools that turn a test-automation repo into a checked, running HyperExecute setup. The tools apply fixed, tested rules; you decide the order, ask the user what only they know, and explain.
@@ -36,7 +37,7 @@ Workflow for "set up HyperExecute" (or anything like it):
 1. analyze_repo first. If confidence is not "high", show the assumptions and ASK its questions before generating; never guess a Maven profile, env values or which framework runs. If it returns teamMemory, follow its notes: the team already decided those things.
 2. If analyze_repo lists existingHyperExecuteYamls, offer to validate_hyperexecute_yaml + optimize_hyperexecute_yaml that file before generating a new one.
 3. scan_credentials_and_reporting before any run; offer fix_hardcoded_credentials when it finds the customer's keys in code.
-4. generate_hyperexecute_yaml with only the options the user asked for (it starts from the team's settings for the repo, then the user's learned usual settings), then validate_hyperexecute_yaml. For v0.1, dry_run_test_discovery and compare the count with the tests analyze_repo found.
+4. generate_hyperexecute_yaml needs the user's LambdaTest account (set_lambdatest_credentials, or the Studio's Setup card): it runs HyperExecute's own analyzer (hyperexecute analyze) on the repo first and refuses without an account. Call it with only the options the user asked for (it starts from the team's settings for the repo, then the user's learned usual settings), then validate_hyperexecute_yaml. For v0.1, dry_run_test_discovery and compare the count with the tests analyze_repo found.
 5. Write the file (write: true) only after the user agrees. Offer generate_ci_pipeline when they want runs from CI.
 6. run_hyperexecute_job, then get_hyperexecute_run until done. Follow its "next". On fixable failures use fix_and_rerun_hyperexecute (max 3 attempts). Never rerun for test-failures (code bugs) or auth errors: report them.
 7. A green run with discoveryCheck "zero-tests" is a failure: fix discovery before calling it done.
@@ -61,6 +62,20 @@ const text = (obj) => {
   const note = takeUpdateNote();
   return { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }, ...(note ? [{ type: "text", text: note }] : [])] };
 };
+// hyperexecute analyze, once per repo per session: required before any YAML is generated.
+const cliAnalyses = new Map();
+async function hyperexecuteAnalyze(repo, { refresh = false } = {}) {
+  const creds = loadCreds();
+  if (!creds) throw new Error("HyperExecute analyze runs before any YAML is generated, and it needs the user's LambdaTest account. Ask the user to add it in the Studio's Setup card (or set_lambdatest_credentials), then generate again.");
+  if (!refresh && cliAnalyses.has(repo)) return cliAnalyses.get(repo);
+  const a = await runCliAnalyze({ cli: await ensureCli(repo), repoPath: repo, username: creds.username, accessKey: creds.accessKey });
+  cliAnalyses.set(repo, a);
+  logStep(repo, "Ran HyperExecute analyze", a.supported ? `${a.language}${a.frameworks.length ? " · " + a.frameworks.map((f) => f.coordinate || f.name).join(", ") : ""}` : a.reason);
+  return a;
+}
+// what the agent needs from it (the raw output stays out of the chat)
+const analyzeSummary = (a) => a && { supported: a.supported, reason: a.reason || undefined, language: a.language, declaredRuntime: a.declaredRuntime, buildTool: a.buildTool, packageManager: a.packageManager, frameworks: a.frameworks, privateRegistries: a.privateRegistries, privateEndpoints: a.privateEndpoints, inaccessibleUrls: a.inaccessibleUrls };
+
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: `Error: ${e.message || e}` }] });
 
 // Default repo = HE_DEFAULT_REPO or the first workspace root the client opened the server in.
@@ -89,6 +104,11 @@ server.registerTool(
       const repo = resolveRepo(repoPath);
       const summary = summarizeProfile(analyzeRepo(repo));
       logStep(repo, "Analyzed the repo", `${summary.primaryFramework || "no framework"} · confidence ${summary.confidence?.level}`);
+      try {
+        summary.hyperexecuteAnalyze = analyzeSummary(await hyperexecuteAnalyze(repo, { refresh: true }));
+      } catch (e) {
+        summary.hyperexecuteAnalyze = { error: e.message };
+      }
       const team = readTeamMemory(repo);
       if (team) summary.teamMemory = { file: TEAM_FILE, options: team.options, notes: team.notes, lastPassing: team.passingSetups[0] };
       return text(summary);
@@ -141,9 +161,12 @@ server.registerTool(
   async (args) => {
     try {
       const repo = resolveRepo(args.repoPath);
-      const profile = analyzeRepo(repo);
+      // no YAML before HyperExecute analyze has run on the repo with the user's account
+      const cliA = applyCliAnalyze(analyzeRepo(repo), await hyperexecuteAnalyze(repo));
+      const profile = cliA.profile;
       const explicit = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined));
       let { options: opts, learned, team } = args.useLearned === false ? { options: explicit, learned: {}, team: {} } : withLearned(profile, explicit, repo);
+      opts = { ...cliA.defaults, ...opts };
       let result;
       try {
         result = generateYaml(profile, opts);
@@ -186,7 +209,7 @@ server.registerTool(
           "```",
           written ? `\nWritten to: ${written}` : "",
           `\nYAML v${result.yamlVersion} | framework: ${result.framework} | mode: ${result.executionMode} | split: ${result.splitBy} (supported: ${result.supportedSplits.join(", ")})`,
-          result.notes.length ? `\nNotes:\n- ${result.notes.join("\n- ")}` : "",
+          [...cliA.notes, ...result.notes].length ? `\nNotes:\n- ${[...cliA.notes, ...result.notes].join("\n- ")}` : "",
           result.warnings.length ? `\nWarnings:\n- ${result.warnings.join("\n- ")}` : "",
           Object.keys(team).length ? `\nUsing the team's settings for this repo (${TEAM_FILE}): ${Object.entries(team).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")}. Pass the option explicitly to override, or remember_for_team to change it for everyone.` : "",
           teamFixes.applied.length ? `\nTeam fixes applied (${TEAM_FILE}):\n- ${teamFixes.applied.join("\n- ")}` : "",
